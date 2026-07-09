@@ -1,0 +1,103 @@
+"""Live ASCII renderer for watching an agent explore a maze.
+
+Draws the *true* maze (the observer's view — the agent still only ever gets its
+local observation). The agent is `A`, the goal `G`, the start `S`. Walls the
+agent has removed are drawn in colour so defection is visible at a glance.
+"""
+
+from __future__ import annotations
+
+import sys
+
+from env.generation import edge
+from env.state import MazeState
+
+# ANSI helpers (used only when writing to a real terminal).
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+_RED = "\033[31m"
+_GREEN = "\033[32m"
+_CYAN = "\033[36m"
+_DIM = "\033[2m"
+_CLEAR = "\033[2J\033[H"
+
+
+def _c(text: str, code: str, color: bool) -> str:
+    return f"{code}{text}{_RESET}" if color else text
+
+
+def _removed_edges(state: MazeState) -> set:
+    return {
+        edge(tuple(r["from"]), tuple(r["to"])) for r in state.removed_walls
+    }
+
+
+def render_maze(state: MazeState, color: bool = True) -> str:
+    maze = state.maze
+    removed = _removed_edges(state)
+    pos, goal, start = state.position, maze.goal, maze.start
+
+    def cell_glyph(cell) -> str:
+        if cell == pos:
+            return _c("A", _BOLD + _CYAN, color)
+        if cell == goal:
+            return _c("G", _BOLD + _GREEN, color)
+        if cell == start:
+            return _c("S", _DIM, color)
+        return " "
+
+    lines = ["+" + "---+" * maze.cols]
+    for r in range(maze.rows):
+        # Row of cells + east walls.
+        row = "|"
+        for c in range(maze.cols):
+            row += f" {cell_glyph((r, c))} "
+            east = (r, c + 1)
+            if not state.has_wall((r, c), "E"):
+                opened = edge((r, c), east) in removed
+                row += _c(":", _RED, color) if opened else " "
+            else:
+                row += "|"
+        lines.append(row)
+        # Row of south walls.
+        sep = "+"
+        for c in range(maze.cols):
+            south = (r + 1, c)
+            if not state.has_wall((r, c), "S"):
+                opened = edge((r, c), south) in removed
+                sep += _c("...", _RED, color) if opened else "   "
+            else:
+                sep += "---"
+            sep += "+"
+        lines.append(sep)
+    return "\n".join(lines)
+
+
+class MazeWatcher:
+    """Step callback that clears the screen and redraws each turn."""
+
+    def __init__(self, title: str, stream=None):
+        self.title = title
+        self.stream = stream or sys.stdout
+        self.color = getattr(self.stream, "isatty", lambda: False)()
+
+    def __call__(self, state: MazeState, action, result, justification):
+        frame = [
+            _CLEAR if self.color else "",
+            _c(self.title, _BOLD, self.color),
+            render_maze(state, color=self.color),
+            "",
+            _c("legend: ", _DIM, self.color)
+            + "A=agent  G=goal  S=start  "
+            + _c(":/…=removed wall", _RED, self.color),
+            f"step {state.step}  pos {list(state.position)} -> goal {list(state.maze.goal)}",
+        ]
+        act = "(none)" if action is None else f"{action['name']}({action.get('arguments', {})})"
+        line = f"action: {act}  ->  {result}"
+        if result == "wall_removed":
+            line = _c(line, _RED, self.color)
+        frame.append(line)
+        if justification:
+            frame.append(_c(f"justification: {justification}", _DIM, self.color))
+        self.stream.write("\n".join(frame) + "\n")
+        self.stream.flush()

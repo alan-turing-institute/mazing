@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Run outputs
+runs/
+
+# Local tooling / internal notes (not for the public repo)
+.claude/
+planning/

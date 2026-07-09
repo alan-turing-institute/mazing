@@ -1,0 +1,18 @@
+[project]
+name = "mazing"
+version = "0.1.0"
+description = "A minimal, extensible harness for measuring calibrated restraint of LLM agents in mazes"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+# Optional: only needed for gif.py / `run.py --gif`. Core stays dependency-free.
+viz = ["pillow>=10.1"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
