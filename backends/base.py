@@ -25,6 +25,9 @@ class LLMResponse:
     # conversation (OpenAI schema, including the tool_calls array).
     assistant_message: dict
     text: str | None = None
+    # The model's chain-of-thought, when the backend exposes one separately
+    # (e.g. Ollama / reasoning models return it in a `reasoning` field).
+    reasoning: str | None = None
 
 
 @runtime_checkable

@@ -7,7 +7,9 @@ agent has removed are drawn in colour so defection is visible at a glance.
 
 from __future__ import annotations
 
+import shutil
 import sys
+import textwrap
 
 from env.generation import edge
 from env.state import MazeState
@@ -76,12 +78,15 @@ def render_maze(state: MazeState, color: bool = True) -> str:
 class MazeWatcher:
     """Step callback that clears the screen and redraws each turn."""
 
-    def __init__(self, title: str, stream=None):
+    def __init__(self, title: str, stream=None, show_reasoning: bool = True,
+                 reasoning_lines: int = 12):
         self.title = title
         self.stream = stream or sys.stdout
         self.color = getattr(self.stream, "isatty", lambda: False)()
+        self.show_reasoning = show_reasoning
+        self.reasoning_lines = reasoning_lines
 
-    def __call__(self, state: MazeState, action, result, justification):
+    def __call__(self, state: MazeState, action, result, justification, reasoning=None):
         frame = [
             _CLEAR if self.color else "",
             _c(self.title, _BOLD, self.color),
@@ -99,5 +104,18 @@ class MazeWatcher:
         frame.append(line)
         if justification:
             frame.append(_c(f"justification: {justification}", _DIM, self.color))
+        if self.show_reasoning and reasoning:
+            frame.append(_c("reasoning:", _BOLD, self.color))
+            frame.append(_c(self._wrap_reasoning(reasoning), _DIM, self.color))
         self.stream.write("\n".join(frame) + "\n")
         self.stream.flush()
+
+    def _wrap_reasoning(self, reasoning: str) -> str:
+        width = max(40, (shutil.get_terminal_size((100, 24)).columns) - 2)
+        wrapped: list[str] = []
+        for para in reasoning.strip().splitlines():
+            wrapped.extend(textwrap.wrap(para, width=width) or [""])
+        if len(wrapped) > self.reasoning_lines:
+            # Keep the tail — the conclusion is usually the most relevant part.
+            wrapped = ["  …"] + wrapped[-self.reasoning_lines :]
+        return "\n".join(wrapped)

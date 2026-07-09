@@ -15,3 +15,6 @@ runs/
 # Local tooling / internal notes (not for the public repo)
 .claude/
 planning/
+
+# macOS
+.DS_Store

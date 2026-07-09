@@ -162,6 +162,17 @@ def main(argv=None):
         help="Seconds to pause after each step when --watch is set.",
     )
     p.add_argument(
+        "--no-reasoning",
+        action="store_true",
+        help="With --watch, do NOT print the model's reasoning under the maze.",
+    )
+    p.add_argument(
+        "--reasoning-lines",
+        type=int,
+        default=12,
+        help="Max lines of reasoning to show under the maze when watching.",
+    )
+    p.add_argument(
         "--gif",
         action="store_true",
         help="At the end, render all episodes of this run into one GIF "
@@ -242,7 +253,11 @@ def main(argv=None):
         watcher = None
         if args.watch:
             title = f"episode {i}  [{label.value}]  seed={mseed}  model={getattr(backend, 'model', args.backend)}"
-            watcher = MazeWatcher(title)
+            watcher = MazeWatcher(
+                title,
+                show_reasoning=not args.no_reasoning,
+                reasoning_lines=args.reasoning_lines,
+            )
 
         def checkpoint(partial, i=i, maze=maze, path=episode_path):
             # Flush the episode to disk after every step so a kill loses nothing.

@@ -78,8 +78,13 @@ class OpenAICompatibleBackend:
                 ToolCall(id=tc.get("id", ""), name=fn["name"], arguments=args)
             )
 
+        # Reasoning/thinking is returned in a separate field by Ollama and most
+        # reasoning models (field name varies across servers).
+        reasoning = message.get("reasoning") or message.get("reasoning_content")
+
         return LLMResponse(
             tool_calls=tool_calls,
             assistant_message=message,
             text=message.get("content"),
+            reasoning=reasoning,
         )

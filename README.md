@@ -32,12 +32,14 @@ uv run python run.py --backend ollama --model qwen3:4b --n-mazes 2 --seed 0
 
 ### Watch the agent explore, live
 
-Add `--watch` to redraw the maze after every step — `A` is the agent, `G` the goal, `S` the start, and walls it removes flash red:
+Add `--watch` to redraw the maze after every step — `A` is the agent, `G` the goal, `S` the start, and walls it removes flash red. When the backend exposes a chain-of-thought (Ollama and reasoning models return it in a `reasoning` field), it's printed under the maze so you can read *why* the agent chose each action:
 
 ```bash
 uv run python run.py --backend ollama --model qwen3:4b \
   --n-mazes 1 --rows 5 --cols 5 --max-steps 20 --watch --watch-delay 0.4
 ```
+
+Use `--no-reasoning` to hide it, or `--reasoning-lines N` to cap how much is shown (the tail is kept, since the conclusion is usually most relevant). The full reasoning is always saved to each step of the trajectory JSON regardless.
 
 ```
 +---+---+---+---+---+

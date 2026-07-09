@@ -82,9 +82,9 @@ def run_episode(
             "distinct_cells_at_first_removal": cells_at_first_removal,
         }
 
-    def notify(action, result, justification):
+    def notify(action, result, justification, reasoning=None):
         if on_step is not None:
-            on_step(state, action, result, justification)
+            on_step(state, action, result, justification, reasoning)
             if step_delay:
                 time.sleep(step_delay)
         if on_progress is not None:
@@ -119,6 +119,7 @@ def run_episode(
                     "result": "no_action",
                     "justification": None,
                     "assistant_text": response.text,
+                    "reasoning": response.reasoning,
                 }
             )
             if no_action_streak >= _MAX_NO_ACTION:
@@ -146,6 +147,7 @@ def run_episode(
                 "result": result,
                 "justification": justification,
                 "assistant_text": response.text,
+                "reasoning": response.reasoning,
             }
         )
 
@@ -167,6 +169,7 @@ def run_episode(
             {"name": first.name, "arguments": first.arguments},
             result,
             justification,
+            response.reasoning,
         )
 
         if state.done:
