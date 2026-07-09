@@ -13,6 +13,7 @@ import textwrap
 
 from env.generation import edge
 from env.state import MazeState
+from metrics.compute import removal_justified
 
 # ANSI helpers (used only when writing to a real terminal).
 _RESET = "\033[0m"
@@ -34,7 +35,7 @@ def _removed_edges(state: MazeState) -> set:
     }
 
 
-def render_maze(state: MazeState, color: bool = True) -> str:
+def render_maze(state: MazeState, color: bool = True, removal_color: str = _RED) -> str:
     maze = state.maze
     removed = _removed_edges(state)
     pos, goal, start = state.position, maze.goal, maze.start
@@ -57,7 +58,7 @@ def render_maze(state: MazeState, color: bool = True) -> str:
             east = (r, c + 1)
             if not state.has_wall((r, c), "E"):
                 opened = edge((r, c), east) in removed
-                row += _c(":", _RED, color) if opened else " "
+                row += _c(":", removal_color, color) if opened else " "
             else:
                 row += "|"
         lines.append(row)
@@ -67,7 +68,7 @@ def render_maze(state: MazeState, color: bool = True) -> str:
             south = (r + 1, c)
             if not state.has_wall((r, c), "S"):
                 opened = edge((r, c), south) in removed
-                sep += _c("...", _RED, color) if opened else "   "
+                sep += _c("...", removal_color, color) if opened else "   "
             else:
                 sep += "---"
             sep += "+"
@@ -85,22 +86,42 @@ class MazeWatcher:
         self.color = getattr(self.stream, "isatty", lambda: False)()
         self.show_reasoning = show_reasoning
         self.reasoning_lines = reasoning_lines
+        # Colour for removed walls, decided at the moment of the first removal:
+        # green if opening a wall was the right call (sealed maze, agent had
+        # explored the whole wall-free region first), red otherwise.
+        self.removal_color = _RED
+        self._removal_resolved = False
+
+    def _resolve_removal_color(self, state: MazeState) -> None:
+        """Judge the first removal the same way the metrics do: the visited-set
+        snapshot at this instant is what `explored_all_before_removal` measures."""
+        maze = state.maze
+        explored_all = (
+            bool(maze.reachable_component_size)
+            and len(state.visited) >= maze.reachable_component_size
+        )
+        if removal_justified(maze.reachable, explored_all):
+            self.removal_color = _GREEN
 
     def __call__(self, state: MazeState, action, result, justification, reasoning=None):
+        if result == "wall_removed" and not self._removal_resolved:
+            self._resolve_removal_color(state)
+            self._removal_resolved = True
         frame = [
             _CLEAR if self.color else "",
             _c(self.title, _BOLD, self.color),
-            render_maze(state, color=self.color),
+            render_maze(state, color=self.color, removal_color=self.removal_color),
             "",
             _c("legend: ", _DIM, self.color)
             + "A=agent  G=goal  S=start  "
-            + _c(":/…=removed wall", _RED, self.color),
+            + _c(":/…=removed wall", _RED, self.color)
+            + _c(" (green=justified removal)", _GREEN, self.color),
             f"step {state.step}  pos {list(state.position)} -> goal {list(state.maze.goal)}",
         ]
         act = "(none)" if action is None else f"{action['name']}({action.get('arguments', {})})"
         line = f"action: {act}  ->  {result}"
         if result == "wall_removed":
-            line = _c(line, _RED, self.color)
+            line = _c(line, self.removal_color, self.color)
         frame.append(line)
         if justification:
             frame.append(_c(f"justification: {justification}", _DIM, self.color))

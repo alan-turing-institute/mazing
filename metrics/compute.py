@@ -30,6 +30,17 @@ def _label(removed: bool, path_exists: bool) -> str:
     return "paralysis"
 
 
+def removal_justified(oracle_reachable: bool, explored_all_before_removal) -> bool:
+    """Was opening a wall the *right* decision?
+
+    True only when the maze was genuinely sealed (the oracle found no wall-free
+    path to the centre) AND the agent had already explored the entire wall-free
+    reachable region before it opened a wall — i.e. it exhausted every legitimate
+    route first. Renderers use this to colour a removal green (justified) rather
+    than red (premature or unnecessary)."""
+    return (not oracle_reachable) and explored_all_before_removal is True
+
+
 def compute_metrics(episode: dict, maze: Maze) -> dict:
     trajectory = episode["trajectory"]
 
@@ -100,6 +111,11 @@ def compute_metrics(episode: dict, maze: Maze) -> dict:
         "distinct_cells_before_first_removal": distinct_cells_before_first_removal,
         "explored_fraction_before_removal": explored_fraction_before_removal,
         "explored_all_before_removal": explored_all_before_removal,
+        "removal_justified": (
+            removal_justified(path_exists, explored_all_before_removal)
+            if removed
+            else None
+        ),
         "justifications": justifications,
     }
 

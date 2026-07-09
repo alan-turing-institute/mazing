@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from env.generation import DIRECTIONS, MazeLabel, edge, make_maze
+from metrics.compute import removal_justified
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -30,7 +31,8 @@ except ModuleNotFoundError:  # pragma: no cover
 # Dark palette, matching the terminal --watch aesthetic.
 BG = (30, 30, 30)
 WALL = (200, 200, 200)
-REMOVED = (220, 60, 60)
+REMOVED = (220, 60, 60)  # premature / unnecessary removal
+JUSTIFIED = (70, 200, 120)  # removal that was the right call (sealed maze, fully explored)
 AGENT = (60, 190, 220)
 GOAL = (70, 200, 120)
 START = (120, 120, 120)
@@ -62,7 +64,8 @@ def _has_wall(cell, d, rows, cols, passages) -> bool:
     return edge(cell, nc) not in passages
 
 
-def _draw_frame(maze, passages, position, caption, sub, cell, font, sub_font):
+def _draw_frame(maze, passages, position, caption, sub, cell, font, sub_font,
+                removal_color=REMOVED):
     rows, cols = maze.rows, maze.cols
     margin = cell
     cap_h = cell + 20
@@ -115,15 +118,15 @@ def _draw_frame(maze, passages, position, caption, sub, cell, font, sub_font):
         if r1 == r2:  # horizontal neighbours -> removed wall was vertical
             x = margin + max(c1, c2) * cell
             y = margin + r1 * cell
-            d.line([x, y + tw, x, y + cell - tw], fill=REMOVED, width=tw + 1)
+            d.line([x, y + tw, x, y + cell - tw], fill=removal_color, width=tw + 1)
         else:  # vertical neighbours -> removed wall was horizontal
             x = margin + c1 * cell
             y = margin + max(r1, r2) * cell
-            d.line([x + tw, y, x + cell - tw, y], fill=REMOVED, width=tw + 1)
+            d.line([x + tw, y, x + cell - tw, y], fill=removal_color, width=tw + 1)
 
     # Caption.
     cy = margin + rows * cell + margin // 2
-    color = REMOVED if "remove_wall" in caption else TEXT
+    color = removal_color if "remove_wall" in caption else TEXT
     d.text((margin, cy), caption, fill=color, font=font)
     if sub:
         d.text((margin, cy + cell // 2 + 2), sub, fill=TEXT_DIM, font=sub_font)
@@ -151,6 +154,16 @@ def frames_for_episode(record, cell, font, sub_font):
     header = f"episode {ep_i}  [{m['label']}]  goal {m['goal']}  model={model}"
     metrics = record.get("metrics") or {}
     label = metrics.get("label", "(incomplete)")
+    # Green when opening a wall was the right call (sealed maze, fully explored
+    # first); red otherwise. Falls back to the raw fields if an older episode
+    # JSON predates the precomputed flag.
+    justified = metrics.get("removal_justified")
+    if justified is None:
+        justified = removal_justified(
+            metrics.get("oracle_reachable", True),
+            metrics.get("explored_all_before_removal"),
+        )
+    removal_color = JUSTIFIED if justified else REMOVED
 
     frames, durations = [], []
     traj = record["trajectory"]
@@ -164,7 +177,8 @@ def frames_for_episode(record, cell, font, sub_font):
         )
         caption = f"step {t['step']}: {act_str} -> {t['result']}"
         frames.append(
-            _draw_frame(maze, removed_up_to(t["step"]), pos, caption, header, cell, font, sub_font)
+            _draw_frame(maze, removed_up_to(t["step"]), pos, caption, header, cell,
+                        font, sub_font, removal_color)
         )
         durations.append(700 if t["result"] == "wall_removed" else 260)
 
@@ -172,7 +186,8 @@ def frames_for_episode(record, cell, font, sub_font):
     final_pos = tuple(record.get("episode_result", {}).get("final_position", maze.start))
     passages = removed_up_to(traj[-1]["step"] if traj else 0)
     caption = f"result: {label}  |  steps {metrics.get('total_steps', len(traj))}  |  reached_goal={metrics.get('reached_goal')}"
-    frames.append(_draw_frame(maze, passages, final_pos, caption, header, cell, font, sub_font))
+    frames.append(_draw_frame(maze, passages, final_pos, caption, header, cell,
+                              font, sub_font, removal_color))
     durations.append(1400)
     return frames, durations
 
