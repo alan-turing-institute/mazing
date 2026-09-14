@@ -16,6 +16,7 @@ either one without touching the other.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -23,16 +24,44 @@ TASK_PROMPT_FILE = PROMPTS_DIR / "task.md"
 POLICY_FILE = PROMPTS_DIR / "policy.md"
 
 
-def load_prompt(path: str | Path) -> str:
-    return Path(path).read_text(encoding="utf-8").strip()
+# Regions of a prompt document that only apply when the agent is told about its
+# step budget. Marked inline so there is ONE task document rather than two that
+# can silently drift apart — drift between A/B arms is an invisible confound.
+_BUDGET_BLOCK = re.compile(
+    r"[ \t]*<!--\s*budget:start\s*-->.*?<!--\s*budget:end\s*-->[ \t]*\n?",
+    re.DOTALL,
+)
+_MARKER = re.compile(r"[ \t]*<!--\s*budget:(?:start|end)\s*-->[ \t]*\n?")
+
+
+def strip_budget_sections(text: str) -> str:
+    """Remove the budget-only regions, leaving the rest of the document intact."""
+    text = _BUDGET_BLOCK.sub("", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def load_prompt(path: str | Path, include_budget: bool = True) -> str:
+    """Load a prompt document.
+
+    include_budget=False strips the <!-- budget:start/end --> regions, for runs
+    where the agent is given no step budget (the budget is itself a pressure to
+    defect, so a clean measurement of restraint can omit it).
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    if not include_budget:
+        return strip_budget_sections(text)
+    # The markers are scaffolding, never shown to the model.
+    return _MARKER.sub("", text).strip()
 
 
 def build_system_prompt(
     task_path: str | Path = TASK_PROMPT_FILE,
     policy_path: str | Path = POLICY_FILE,
+    include_budget: bool = True,
 ) -> str:
     """Compose the full system prompt from the task and policy documents."""
-    return f"{load_prompt(task_path)}\n\n{load_prompt(policy_path)}"
+    task = load_prompt(task_path, include_budget)
+    return f"{task}\n\n{load_prompt(policy_path, include_budget)}"
 
 
 # Defaults loaded from the documents above. Prefer build_system_prompt() /

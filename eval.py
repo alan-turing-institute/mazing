@@ -58,14 +58,20 @@ def _pct(num: int, den: int) -> str:
 
 
 def aggregate(episodes: list[dict]) -> dict:
-    """Group episodes by (policy_hash, model) and compute the summary stats."""
+    """Group episodes by (policy_hash, model, step_budget_shown) and compute the
+    summary stats.
+
+    Whether the agent was shown a step budget is a separate experimental arm —
+    time pressure is itself a reason to defect — so the two must not be pooled.
+    Runs recorded before the flag existed all showed the budget, so they default
+    to True and group exactly as they did before."""
     groups: dict[tuple, list[dict]] = defaultdict(list)
     policy_text: dict[str, str] = {}
     for d in episodes:
         c = d["config"]
         phash = c.get("policy_hash", "?")
         model = c.get("model") or c.get("dummy_policy") or c.get("backend")
-        groups[(phash, model)].append(d)
+        groups[(phash, model, c.get("step_budget_shown", True))].append(d)
         policy_text.setdefault(phash, c.get("policy", ""))
 
     report = {}
@@ -122,11 +128,12 @@ def print_report(agg: dict) -> None:
         text = policy_text.get(phash, "").strip()
         if text:
             print(f'  "{text}"')
-        for (ph, model), r in sorted(report.items()):
+        for (ph, model, budget_shown), r in sorted(report.items()):
             if ph != phash:
                 continue
             print()
-            print(f"  model = {model}   ({r['n']} episode(s))")
+            arm = "" if budget_shown else "   [no step budget shown]"
+            print(f"  model = {model}   ({r['n']} episode(s)){arm}")
             print(f"    reached goal:          {_pct(r['reached_goal'], r['n'])}")
             labels = "  ".join(f"{lab}={r['labels'].get(lab, 0)}" for lab in LABELS)
             print(f"    labels:                {labels}")
@@ -158,6 +165,7 @@ def print_per_episode(episodes: list[dict]) -> None:
     cols = [
         "policy",
         "model",
+        "budget",
         "maze",
         "label",
         "reached",
@@ -173,6 +181,7 @@ def print_per_episode(episodes: list[dict]) -> None:
             {
                 "policy": c.get("policy_hash", "?"),
                 "model": c.get("model") or c.get("dummy_policy") or c.get("backend"),
+                "budget": "shown" if c.get("step_budget_shown", True) else "hidden",
                 "maze": d["maze"]["label"],
                 "label": m["label"],
                 "reached": m["reached_goal"],
@@ -198,6 +207,7 @@ def write_csv(agg: dict, path: Path) -> None:
     fields = [
         "policy_hash",
         "model",
+        "step_budget_shown",
         "n",
         "reached_goal",
         "n_solvable",
@@ -216,10 +226,11 @@ def write_csv(agg: dict, path: Path) -> None:
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
-        for (phash, model), r in sorted(agg["report"].items()):
+        for (phash, model, budget_shown), r in sorted(agg["report"].items()):
             row = {k: r[k] for k in fields if k in r}
             row["policy_hash"] = phash
             row["model"] = model
+            row["step_budget_shown"] = budget_shown
             writer.writerow(row)
 
 

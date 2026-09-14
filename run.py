@@ -14,10 +14,12 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
 import os
 import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -31,6 +33,26 @@ from env.generation import MazeLabel, make_maze
 from metrics import compute_metrics, summary_row
 from runner import run_episode
 from runner.render import MazeWatcher
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Write a file atomically: temp file in the same directory, fsync, rename.
+
+    Checkpoints are overwritten after every step, so a plain write_text would
+    leave a truncated (unparseable) episode file if the process is killed
+    mid-write — losing the whole episode, not just the last step. os.replace is
+    atomic on the same filesystem, so readers only ever see a complete file.
+    """
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def build_maze_specs(n: int, seed: int) -> list[tuple[int, MazeLabel]]:
@@ -104,7 +126,10 @@ def print_summary(rows: list[dict]) -> None:
         "reachable_cells",
         "explored_frac_before_removal",
     ]
-    widths = {c: max(len(c), *(len(str(r[c])) for r in rows)) for c in cols}
+    if not rows:
+        print("\nNo episodes to summarise.")
+        return
+    widths = {c: max([len(c)] + [len(str(r[c])) for r in rows]) for c in cols}
     header = "  ".join(c.ljust(widths[c]) for c in cols)
     print("\n" + header)
     print("-" * len(header))
@@ -136,7 +161,22 @@ def main(argv=None):
     p.add_argument("--api-key", default=None, help="Overrides $OPENAI_API_KEY.")
     p.add_argument("--n-mazes", type=int, default=config.DEFAULT_N_MAZES)
     p.add_argument("--seed", type=int, default=config.DEFAULT_SEED)
-    p.add_argument("--max-steps", type=int, default=config.DEFAULT_MAX_STEPS)
+    p.add_argument(
+        "--max-steps",
+        type=int,
+        default=config.DEFAULT_MAX_STEPS,
+        help="Step budget. Shown to the agent as step_budget/steps_remaining "
+        "unless --no-step-budget is set, in which case it is a silent cap.",
+    )
+    p.add_argument(
+        "--no-step-budget",
+        action="store_true",
+        help="Do not tell the agent it has a limited number of steps: drop "
+        "step_budget/steps_remaining from the observation and strip the "
+        "budget paragraph from the task prompt. --max-steps still caps the "
+        "episode (ending it as 'hard_cap_reached'), so nothing runs forever. "
+        "Use it to measure restraint without time pressure as a confound.",
+    )
     p.add_argument("--rows", type=int, default=config.DEFAULT_ROWS)
     p.add_argument("--cols", type=int, default=config.DEFAULT_COLS)
     p.add_argument("--out-dir", default="runs")
@@ -179,14 +219,21 @@ def main(argv=None):
         "(<run-dir>/session.gif). Requires the 'viz' extra: uv run --extra viz.",
     )
     args = p.parse_args(argv)
+    if args.n_mazes < 1:
+        p.error("--n-mazes must be >= 1")
 
     backend = make_backend(args)
     specs = build_maze_specs(args.n_mazes, args.seed)
 
     # Compose the system prompt from the (independently swappable) documents.
-    task_prompt = config.load_prompt(args.task_prompt)
-    policy = config.load_prompt(args.policy)
-    system_prompt = config.build_system_prompt(args.task_prompt, args.policy)
+    # The stored copies are post-stripping, so run_config.json always records
+    # exactly what the model was shown.
+    include_budget = not args.no_step_budget
+    task_prompt = config.load_prompt(args.task_prompt, include_budget)
+    policy = config.load_prompt(args.policy, include_budget)
+    system_prompt = config.build_system_prompt(
+        args.task_prompt, args.policy, include_budget
+    )
 
     # Group runs by policy: same policy text -> same folder, an edited policy
     # -> a new folder (via a short content hash). A copy of the policy is
@@ -194,12 +241,21 @@ def main(argv=None):
     policy_hash = hashlib.sha256(policy.encode("utf-8")).hexdigest()[:8]
     policy_dir = Path(args.out_dir) / f"{Path(args.policy).stem}_{policy_hash}"
     policy_dir.mkdir(parents=True, exist_ok=True)
-    (policy_dir / "policy.md").write_text(policy + "\n")
+    write_atomic(policy_dir / "policy.md", policy + "\n")
 
     model_tag = getattr(backend, "model", None) or args.dummy_policy
     safe_model = re.sub(r"[^A-Za-z0-9._-]", "-", model_tag)
-    run_id = f"{args.backend}_{safe_model}_seed{args.seed}_{int(time.time())}"
+    # The budget arm is part of the run's identity, so an A/B pair is legible
+    # from the folder name alone.
+    arm = "" if include_budget else "_nobudget"
+    run_id = f"{args.backend}_{safe_model}_seed{args.seed}{arm}_{int(time.time())}"
+    # Two runs started in the same second would otherwise land in the same
+    # folder and silently overwrite each other's episodes.
     out_dir = policy_dir / run_id
+    for n in range(2, 100):
+        if not out_dir.exists():
+            break
+        out_dir = policy_dir / f"{run_id}_{n}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     run_config = {
@@ -210,6 +266,7 @@ def main(argv=None):
         "n_mazes": args.n_mazes,
         "seed": args.seed,
         "max_steps": args.max_steps,
+        "step_budget_shown": include_budget,
         "rows": args.rows,
         "cols": args.cols,
         "task_prompt_file": str(args.task_prompt),
@@ -220,7 +277,7 @@ def main(argv=None):
     }
     # Write the run config once, upfront, so a run is identifiable even if it is
     # killed before the first episode finishes.
-    (out_dir / "run_config.json").write_text(json.dumps(run_config, indent=2))
+    write_atomic(out_dir / "run_config.json", json.dumps(run_config, indent=2))
 
     def assemble_record(i, maze, episode, complete):
         """Build the on-disk episode record. Metrics are only meaningful once
@@ -261,13 +318,17 @@ def main(argv=None):
 
         def checkpoint(partial, i=i, maze=maze, path=episode_path):
             # Flush the episode to disk after every step so a kill loses nothing.
-            path.write_text(json.dumps(assemble_record(i, maze, partial, False), indent=2))
+            # Atomic: a kill mid-write leaves the previous checkpoint intact.
+            write_atomic(
+                path, json.dumps(assemble_record(i, maze, partial, False), indent=2)
+            )
 
         episode = run_episode(
             maze,
             backend,
             max_steps=args.max_steps,
             system_prompt=system_prompt,
+            show_step_budget=include_budget,
             on_step=watcher,
             on_progress=checkpoint,
             step_delay=args.watch_delay if args.watch else 0.0,
@@ -275,16 +336,19 @@ def main(argv=None):
         metrics = compute_metrics(episode, maze)
 
         # Final, complete record (overwrites the last checkpoint).
-        episode_path.write_text(
-            json.dumps(assemble_record(i, maze, episode, True), indent=2)
+        write_atomic(
+            episode_path, json.dumps(assemble_record(i, maze, episode, True), indent=2)
         )
         summary_rows.append(summary_row(i, maze, metrics))
 
         # Rewrite the aggregate summary after each episode so it is always current.
-        with (out_dir / "summary.csv").open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(summary_rows)
+        buf = io.StringIO()
+        writer = csv.DictWriter(
+            buf, fieldnames=list(summary_rows[0].keys()), lineterminator="\r\n"
+        )
+        writer.writeheader()
+        writer.writerows(summary_rows)
+        write_atomic(out_dir / "summary.csv", buf.getvalue())
 
     print(f"\nSaved {len(summary_rows)} episode(s) to {out_dir}/")
     print_summary(summary_rows)

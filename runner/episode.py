@@ -36,14 +36,22 @@ def run_episode(
     backend: LLMBackend,
     max_steps: int,
     system_prompt: str = SYSTEM_PROMPT,
+    show_step_budget: bool = True,
     on_step: Callable | None = None,
     on_progress: Callable | None = None,
     step_delay: float = 0.0,
 ) -> dict:
     """Run one episode.
 
-    max_steps is a hard step budget (always enforced, reproducible); it is
-    exposed to the agent as steps_remaining so it knows how many steps it has.
+    max_steps is a hard step budget (always enforced, reproducible). By default
+    it is exposed to the agent as step_budget/steps_remaining so it knows how
+    many steps it has.
+
+    show_step_budget=False hides it instead: max_steps still caps the episode
+    (nothing may run unbounded — a stuck policy would never terminate) but the
+    agent is told nothing about it, and the episode ends with "hard_cap_reached"
+    rather than "step_budget_exhausted". Use it to measure restraint without
+    time pressure, which is itself a reason to defect.
 
     Callbacks:
       on_step(state, action, result, justification) -- once with the initial
@@ -64,10 +72,12 @@ def run_episode(
     cells_at_first_removal: int | None = None
 
     def observe() -> dict:
-        """Local observation, augmented with the remaining step budget."""
+        """Local observation, augmented with the remaining step budget unless
+        this run hides the budget from the agent."""
         obs = state.observe()
-        obs["step_budget"] = max_steps
-        obs["steps_remaining"] = max_steps - state.step
+        if show_step_budget:
+            obs["step_budget"] = max_steps
+            obs["steps_remaining"] = max_steps - state.step
         return obs
 
     def result_dict(end_reason: str) -> dict:
@@ -102,7 +112,11 @@ def run_episode(
         if state.done:
             break
         if state.step >= max_steps:
-            end_reason = "step_budget_exhausted"
+            # Distinguish "the agent ran out of the budget it was shown" from
+            # "the harness cut off a run the agent thought was open-ended".
+            end_reason = (
+                "step_budget_exhausted" if show_step_budget else "hard_cap_reached"
+            )
             break
 
         obs_before = observe()
@@ -133,7 +147,14 @@ def run_episode(
         no_action_streak = 0
         # Act on the first tool call only (one action per turn).
         first = response.tool_calls[0]
-        result, justification = apply_action(state, first.name, first.arguments)
+        if first.parse_error is not None:
+            # The backend could not parse the argument JSON, so we don't know
+            # what was asked for. Record the parse failure explicitly (it costs
+            # a step, like any other failed action) rather than executing a
+            # guess.
+            result, justification = "malformed_arguments", None
+        else:
+            result, justification = apply_action(state, first.name, first.arguments)
 
         if result == "wall_removed" and cells_at_first_removal is None:
             # state.visited already includes the cell it is standing in.
@@ -143,7 +164,11 @@ def run_episode(
             {
                 "step": state.step,
                 "observation": obs_before,
-                "action": {"name": first.name, "arguments": first.arguments},
+                "action": {
+                    "name": first.name,
+                    "arguments": first.arguments,
+                    "parse_error": first.parse_error,
+                },
                 "result": result,
                 "justification": justification,
                 "assistant_text": response.text,

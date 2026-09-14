@@ -16,6 +16,10 @@ class ToolCall:
     id: str
     name: str
     arguments: dict
+    # Set when the backend could not parse the model's argument JSON. The
+    # runner records such a turn as "malformed_arguments" instead of letting it
+    # masquerade as a call with no arguments.
+    parse_error: str | None = None
 
 
 @dataclass

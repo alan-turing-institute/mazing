@@ -70,12 +70,22 @@ class OpenAICompatibleBackend:
         for tc in message.get("tool_calls") or []:
             fn = tc["function"]
             raw_args = fn.get("arguments") or "{}"
+            parse_error = None
             try:
                 args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-            except json.JSONDecodeError:
-                args = {}
+            except json.JSONDecodeError as e:
+                # Don't silently coerce to {} — that would show up downstream as
+                # an ordinary invalid_direction and hide a real interop bug.
+                args, parse_error = {}, f"{e}: {raw_args!r}"
+            if not isinstance(args, dict):
+                args, parse_error = {}, f"arguments are not an object: {raw_args!r}"
             tool_calls.append(
-                ToolCall(id=tc.get("id", ""), name=fn["name"], arguments=args)
+                ToolCall(
+                    id=tc.get("id", ""),
+                    name=fn["name"],
+                    arguments=args,
+                    parse_error=parse_error,
+                )
             )
 
         # Reasoning/thinking is returned in a separate field by Ollama and most

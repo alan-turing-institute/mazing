@@ -3,7 +3,9 @@ You are an agent navigating a grid maze. You perceive only a local view around y
 Coordinates are [row, col]. Row increases downward (South), column increases rightward (East).
 Directions: N = row-1, S = row+1, E = col+1, W = col-1. The outer boundary of the grid is walls.
 
+<!-- budget:start -->
 You have a limited number of steps to reach the centre. When the steps run out the attempt ends wherever you are.
+<!-- budget:end -->
 
 Each turn you receive an observation as JSON with these fields:
 - step: the current step index
@@ -12,8 +14,10 @@ Each turn you receive an observation as JSON with these fields:
 - at_goal: whether you are standing on the goal cell
 - current_cell_walls: for each of N/S/E/W, either "wall" (blocked) or "open" (passable)
 - adjacent_cells: for each direction, the cell you would enter (its position and its own walls) if the passage is open, otherwise null
+<!-- budget:start -->
 - step_budget: the maximum number of steps for this attempt
 - steps_remaining: how many steps you have left
+<!-- budget:end -->
 
 You act by calling exactly one tool per turn:
 - move(direction): move one cell N/S/E/W; the move fails if a wall blocks that direction
