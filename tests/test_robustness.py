@@ -510,3 +510,21 @@ def test_unclassified_config_fields_are_reported():
         "tool_schema"
     }
     assert eval_module.ungrouped_fields([_record()]) == set()
+
+
+def test_partial_checkpoints_keep_the_episode_accounting(tmp_path):
+    """metrics is null until an episode completes, so the fields the analysis
+    needs must also live in episode_result — a killed episode is the one whose
+    token accounting matters most."""
+    run_module.main(
+        ["--backend", "dummy", "--n-mazes", "1", "--rows", "5", "--cols", "5",
+         "--max-steps", "4", "--out-dir", str(tmp_path)]
+    )
+    (episode_path,) = tmp_path.glob("*/*/episode_*.json")
+    result = json.loads(episode_path.read_text())["episode_result"]
+    for key in (
+        "distinct_cells_visited",
+        "distinct_cells_at_first_removal",
+        "peak_prompt_tokens",
+    ):
+        assert key in result

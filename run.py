@@ -331,6 +331,12 @@ def main(argv=None):
                     "removed_walls",
                     "end_reason",
                     "final_position",
+                    "distinct_cells_visited",
+                    "distinct_cells_at_first_removal",
+                    # Kept here as well as in metrics: metrics is null until the
+                    # episode completes, and a killed episode is exactly the one
+                    # whose token accounting you want to read.
+                    "peak_prompt_tokens",
                 )
             },
             "metrics": compute_metrics(episode, maze) if complete else None,
