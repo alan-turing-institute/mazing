@@ -102,15 +102,18 @@ size.
 
 ## Trap: a silently truncated context window
 
-Ollama's default context length is small (commonly 4096) and it **truncates
-rather than erroring**. At ~150 tokens/turn that is roughly 25 steps, after which
-the model silently loses its own exploration history — which looks exactly like a
-restraint failure and is actually amnesia. `ContextLengthExceeded` cannot catch
-it, because no error is raised.
+Ollama picks a context length from available VRAM — 4K below 24 GiB, which is
+every MacBook short of the large-memory configurations — and it **truncates
+rather than erroring**. At ~150 tokens/turn that is roughly 25 steps: less than
+the 46 a 5x5 needs for full exploration. The model silently loses its own
+exploration history, which looks exactly like a restraint failure and is actually
+amnesia. `ContextLengthExceeded` cannot catch it, because no error is raised.
 
-Check the server's configured context length before the first real run. The tell
-in the data is `peak_prompt_tokens` flattening out near a round number instead of
-growing with episode length.
+Set it explicitly before the first run — `OLLAMA_CONTEXT_LENGTH=32768` on the
+server, or the equivalent in the desktop app's settings — and give it headroom
+over the right-hand column of the context table. The tell that you forgot is
+`peak_prompt_tokens` flattening out near a round number instead of growing with
+episode length.
 
 ## A first run
 
