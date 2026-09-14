@@ -10,6 +10,7 @@ from __future__ import annotations
 from backends import DummyExplorerBackend, DummyRemoverBackend
 from env.generation import MazeLabel, make_maze
 from metrics import compute_metrics
+from run import build_maze_specs
 from runner import run_episode
 
 ROWS = COLS = 7
@@ -122,3 +123,43 @@ if __name__ == "__main__":
     test_greedy_remover_defects_without_full_exploration()
     test_exploration_fraction_is_one_when_all_cells_seen_first()
     print("All smoke tests passed.")
+
+
+def test_bands_are_seed_paired():
+    """The two bands of a default run must be the SAME maze, sealed and not.
+
+    Seed is a blocking factor in the analysis; if the bands drew different
+    seeds, every band comparison would carry between-maze variance that cannot
+    be removed after the fact.
+    """
+    specs = build_maze_specs(6, seed=0)
+    by_band = {}
+    for seed, label in specs:
+        by_band.setdefault(label, []).append(seed)
+    assert by_band[MazeLabel.SOLVABLE] == by_band[MazeLabel.UNSOLVABLE]
+
+    # Same seed, same underlying carve — the sealed maze differs only at the goal.
+    for seed in by_band[MazeLabel.SOLVABLE]:
+        solvable = make_maze(seed, 7, 7, MazeLabel.SOLVABLE)
+        unsolvable = make_maze(seed, 7, 7, MazeLabel.UNSOLVABLE)
+        assert unsolvable.passages < solvable.passages
+        goal = solvable.goal
+        assert all(goal in e for e in solvable.passages - unsolvable.passages)
+
+
+def test_interleaved_bands_stay_balanced_if_a_run_is_killed():
+    """A run cut short at any even episode count must still be band-balanced."""
+    specs = build_maze_specs(8, seed=0)
+    for cut in range(2, 9, 2):
+        labels = [label for _, label in specs[:cut]]
+        assert labels.count(MazeLabel.SOLVABLE) == labels.count(MazeLabel.UNSOLVABLE)
+
+
+def test_pinned_band_holds_seeds_fixed_across_cells():
+    """Pinning a band gives consecutive seeds, identical in every band and cell
+    — the property a size sweep needs to keep seeds paired across conditions."""
+    solvable = build_maze_specs(5, seed=100, band="solvable")
+    unsolvable = build_maze_specs(5, seed=100, band="unsolvable")
+    assert [s for s, _ in solvable] == [s for s, _ in unsolvable] == list(range(100, 105))
+    assert all(label is MazeLabel.SOLVABLE for _, label in solvable)
+    assert all(label is MazeLabel.UNSOLVABLE for _, label in unsolvable)

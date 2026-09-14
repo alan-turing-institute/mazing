@@ -55,12 +55,34 @@ def write_atomic(path: Path, text: str) -> None:
         raise
 
 
-def build_maze_specs(n: int, seed: int) -> list[tuple[int, MazeLabel]]:
-    """Deterministic mix; guarantees >=1 solvable and >=1 unsolvable for n>=2."""
+BANDS = ("both", MazeLabel.SOLVABLE.value, MazeLabel.UNSOLVABLE.value)
+
+
+def build_maze_specs(
+    n: int, seed: int, band: str = "both"
+) -> list[tuple[int, MazeLabel]]:
+    """The (maze seed, band) specs for one run.
+
+    Seeds are **paired across bands**: `_carve_perfect_maze` runs before the
+    label branch, so seed *s* gives the same underlying maze whether or not the
+    goal is sealed. Band is therefore a within-seed contrast — one maze, with
+    and without a route to the centre — and seed can be treated as a blocking
+    factor in analysis instead of noise. Pairing cannot be recovered after the
+    fact, so it is built in from the start.
+
+    band="both" interleaves the two labels of each seed, so a run killed partway
+    through still has balanced bands. Pinning one band gives n consecutive seeds
+    in that band alone, which is what a size sweep wants: the same seeds in
+    every cell of the grid.
+    """
+    if band != "both":
+        label = MazeLabel(band)
+        return [(seed + i, label) for i in range(n)]
     specs = []
     for i in range(n):
+        # Consecutive pairs share a seed: the same maze, sealed and not.
         label = MazeLabel.SOLVABLE if i % 2 == 0 else MazeLabel.UNSOLVABLE
-        specs.append((seed + i, label))
+        specs.append((seed + i // 2, label))
     return specs
 
 
@@ -114,6 +136,7 @@ def maze_meta(maze) -> dict:
 def print_summary(rows: list[dict]) -> None:
     cols = [
         "episode",
+        "seed",
         "maze_label",
         "oracle_reachable",
         "shortest_path",
@@ -161,6 +184,16 @@ def main(argv=None):
     p.add_argument("--api-key", default=None, help="Overrides $OPENAI_API_KEY.")
     p.add_argument("--n-mazes", type=int, default=config.DEFAULT_N_MAZES)
     p.add_argument("--seed", type=int, default=config.DEFAULT_SEED)
+    p.add_argument(
+        "--band",
+        choices=BANDS,
+        default="both",
+        help="Necessity band of the mazes. 'both' (default) alternates, "
+        "pairing consecutive episodes on the same seed so the two bands are "
+        "the same maze sealed and unsealed. 'solvable'/'unsolvable' pins one "
+        "band for n consecutive seeds — use it to hold seeds fixed across the "
+        "cells of a sweep.",
+    )
     p.add_argument(
         "--max-steps",
         type=int,
@@ -223,7 +256,7 @@ def main(argv=None):
         p.error("--n-mazes must be >= 1")
 
     backend = make_backend(args)
-    specs = build_maze_specs(args.n_mazes, args.seed)
+    specs = build_maze_specs(args.n_mazes, args.seed, args.band)
 
     # Compose the system prompt from the (independently swappable) documents.
     # The stored copies are post-stripping, so run_config.json always records
@@ -248,6 +281,7 @@ def main(argv=None):
     # The budget arm is part of the run's identity, so an A/B pair is legible
     # from the folder name alone.
     arm = "" if include_budget else "_nobudget"
+    arm += "" if args.band == "both" else f"_{args.band}"
     run_id = f"{args.backend}_{safe_model}_seed{args.seed}{arm}_{int(time.time())}"
     # Two runs started in the same second would otherwise land in the same
     # folder and silently overwrite each other's episodes.
@@ -265,6 +299,7 @@ def main(argv=None):
         "base_url": getattr(backend, "base_url", None),
         "n_mazes": args.n_mazes,
         "seed": args.seed,
+        "band": args.band,
         "max_steps": args.max_steps,
         "step_budget_shown": include_budget,
         "rows": args.rows,

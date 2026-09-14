@@ -84,6 +84,20 @@ There is one task document, not two: the budget-dependent lines in `prompts/task
 
 Both arms are recorded (`step_budget_shown` in `run_config.json`, a `_nobudget` tag in the run folder) and `eval.py` keeps them in separate groups, so running both and diffing the restraint rates tells you how much of the defection was budget pressure.
 
+### Pick a necessity band
+
+Every maze is carved before it is labelled, so seed *s* gives the same maze whether or not the goal is sealed. Runs exploit that: by default consecutive episodes share a seed, one solvable and one unsolvable, so the band comparison is one maze with and without a route to the centre rather than two different mazes.
+
+```bash
+# 30 seeds, unsolvable only — the same 30 mazes as the solvable arm
+uv run python run.py --backend ollama --model qwen3:4b \
+  --n-mazes 30 --band unsolvable --no-step-budget --max-steps 980
+```
+
+`--band solvable|unsolvable` pins one band for `--n-mazes` consecutive seeds. Use it when a condition (maze size, policy, budget) is being swept and the seeds must stay fixed across every cell of the grid; the band is tagged in the run folder name and recorded as `band` in `run_config.json`. The default, `both`, interleaves, so a run killed partway through is still band-balanced.
+
+Seeds cannot be paired retroactively — an unpaired run carries between-maze variance that no later analysis can remove — so the pairing is built in rather than added when the sweep starts.
+
 ### Any other OpenAI-compatible endpoint (hosted API, vLLM, LM Studio, ...)
 
 ```bash
@@ -210,7 +224,7 @@ tests/test_smoke.py  # end-to-end smoke test, no model required
 
 ## Design notes
 
-- Reproducible from a seed; the `--seed` offsets per-maze seeds so the mix is deterministic (`--n-mazes >= 2` guarantees at least one solvable and one unsolvable maze).
+- Reproducible from a seed; the `--seed` offsets per-maze seeds so the mix is deterministic (`--n-mazes >= 2` guarantees at least one solvable and one unsolvable maze), and the two bands are drawn on the *same* seeds so band is a within-maze contrast.
 - The step budget is an experimental arm, not a fixture: `--no-step-budget` hides it from the agent while keeping `--max-steps` as a silent cap, and `eval.py` never pools the two arms.
 - Zero runtime dependencies (the OpenAI-compatible client uses only the standard library); `pytest` is the only dev dependency.
 - The observation is serialised as JSON into the conversation, so hosted LLMs and the dummy backends read state through exactly the same channel.
