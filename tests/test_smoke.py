@@ -8,7 +8,9 @@ Run with:  uv run pytest   (or:  uv run python -m tests.test_smoke)
 from __future__ import annotations
 
 from backends import DummyExplorerBackend, DummyRemoverBackend
-from env.generation import MazeLabel, make_maze
+import pytest
+
+from env.generation import DIRECTIONS, MazeLabel, edge, make_maze
 from metrics import compute_metrics
 from run import build_maze_specs
 from runner import run_episode
@@ -163,3 +165,54 @@ def test_pinned_band_holds_seeds_fixed_across_cells():
     assert [s for s, _ in solvable] == [s for s, _ in unsolvable] == list(range(100, 105))
     assert all(label is MazeLabel.SOLVABLE for _, label in solvable)
     assert all(label is MazeLabel.UNSOLVABLE for _, label in unsolvable)
+
+
+def test_unsolvable_seals_the_goal_and_nothing_else():
+    """Search cost must be a property of the size, not of where the carve
+    happened to put the goal. Sealing a cut vertex in a spanning tree used to
+    orphan whole subtrees: on a 9x9 the explorable region ranged over 8-80
+    cells across seeds, so size barely predicted how much there was to search."""
+    from env.oracle import reachable_component
+
+    for n in (5, 7, 9, 11):
+        for seed in range(25):
+            maze = make_maze(seed, n, n, MazeLabel.UNSOLVABLE)
+            assert len(reachable_component(maze)) == n * n - 1
+            assert maze.reachable_component_size == n * n - 1
+            assert not maze.reachable
+
+
+def test_the_two_bands_differ_only_at_the_goal():
+    """The repairs go into both bands, so the band contrast is exactly
+    'the centre is sealed' with no other structural difference."""
+    for n in (5, 7, 9):
+        for seed in range(25):
+            solvable = make_maze(seed, n, n, MazeLabel.SOLVABLE)
+            unsolvable = make_maze(seed, n, n, MazeLabel.UNSOLVABLE)
+            difference = solvable.passages ^ unsolvable.passages
+            assert difference, "the bands must differ somewhere"
+            assert all(solvable.goal in e for e in difference)
+
+
+def test_one_removal_always_suffices_on_an_unsolvable_maze():
+    """The band means 'exactly one wall must go' — k=1 by construction."""
+    from env.oracle import bfs_reachability
+
+    for n in (5, 7, 9):
+        for seed in range(15):
+            maze = make_maze(seed, n, n, MazeLabel.UNSOLVABLE)
+            opened = False
+            for d, (dr, dc) in DIRECTIONS.items():
+                nc = (maze.goal[0] + dr, maze.goal[1] + dc)
+                if not maze.in_bounds(nc):
+                    continue
+                probe = make_maze(seed, n, n, MazeLabel.UNSOLVABLE)
+                probe.passages.add(edge(maze.goal, nc))
+                if bfs_reachability(probe)[0]:
+                    opened = True
+            assert opened, "no single wall reconnects the goal"
+
+
+def test_no_unsolvable_maze_when_the_goal_is_the_start():
+    with pytest.raises(ValueError):
+        make_maze(0, 1, 1, MazeLabel.UNSOLVABLE)

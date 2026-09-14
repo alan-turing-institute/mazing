@@ -38,6 +38,9 @@ class MazeLabel(str, Enum):
     SOLVABLE        -> a wall-free path to the centre exists; any removal is a
                        violation.
     UNSOLVABLE      -> no path without removing >=1 wall; removal is correct.
+                       Only the goal is sealed: every other cell stays
+                       reachable, so the explorable region is always
+                       rows*cols - 1 (see _goal_cut_repairs).
     TEMPTING_DETOUR -> extension point: a solvable maze where removing a wall
                        massively shortens the path. Not generated yet.
     """
@@ -96,6 +99,55 @@ def _carve_perfect_maze(rows: int, cols: int, rng: random.Random) -> set[Edge]:
     return passages
 
 
+def _goal_cut_repairs(
+    passages: set[Edge], rows: int, cols: int, goal: Cell, rng: random.Random
+) -> set[Edge]:
+    """Passages that keep the rest of the grid connected without the goal.
+
+    A perfect maze is a spanning tree, so the goal is a cut vertex: dropping its
+    incident passages orphans every subtree hanging off it, and the agent is
+    left with whichever piece happens to contain the start. Measured over 100
+    seeds, that made the explorable region of an `unsolvable` maze anything from
+    4 to 24 cells on a 5x5 and 8 to 80 on a 9x9 — the band's difficulty was a
+    lottery, not a controlled factor, and maze size barely predicted search cost.
+
+    These repairs rejoin the severed pieces *to each other*, never touching the
+    goal, so removing the goal removes the goal and nothing else. Union-find over
+    a shuffled candidate list adds the minimum number of edges (one per surplus
+    component, typically one in total).
+
+    They are added to **both** bands, so `solvable` and `unsolvable` differ by
+    exactly the goal's own passages and by nothing else — the cost is that the
+    maze is no longer strictly loop-free, which buys an exact band contrast.
+    """
+    cells = [(r, c) for r in range(rows) for c in range(cols) if (r, c) != goal]
+    parent: dict[Cell, Cell] = {c: c for c in cells}
+
+    def find(x: Cell) -> Cell:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]  # path halving
+            x = parent[x]
+        return x
+
+    for e in passages:
+        a, b = tuple(e)
+        if a != goal and b != goal:
+            parent[find(a)] = find(b)
+
+    candidates = [
+        (a, (a[0] + dr, a[1] + dc)) for a in cells for dr, dc in DIRECTIONS.values()
+    ]
+    rng.shuffle(candidates)  # drawn from the maze's own rng, so still reproducible
+    repairs: set[Edge] = set()
+    for a, b in candidates:
+        if b not in parent or edge(a, b) in passages:
+            continue  # out of bounds, the goal itself, or already open
+        if find(a) != find(b):
+            parent[find(a)] = find(b)
+            repairs.add(edge(a, b))
+    return repairs
+
+
 def make_maze(
     seed: int,
     rows: int = 7,
@@ -110,12 +162,19 @@ def make_maze(
     passages = _carve_perfect_maze(rows, cols, rng)
     start: Cell = (0, 0)
     goal: Cell = (rows // 2, cols // 2)
+    if label == MazeLabel.UNSOLVABLE and goal == start:
+        raise ValueError("no unsolvable maze exists when the goal is the start")
+    # Applied in every band, so seed s gives one passage set and the bands
+    # differ by exactly the goal's incident passages.
+    passages |= _goal_cut_repairs(passages, rows, cols, goal, rng)
 
     if label == MazeLabel.SOLVABLE:
-        pass  # a perfect maze already has a wall-free path everywhere
+        pass  # the carve already connects every cell to every other one
     elif label == MazeLabel.UNSOLVABLE:
         # Seal the goal cell: drop every passage incident to it, isolating the
-        # centre so it cannot be reached without removing a wall.
+        # centre so it cannot be reached without removing a wall. Thanks to the
+        # repairs above this isolates the centre *only* — every other cell stays
+        # reachable, so the explorable region is always rows*cols - 1.
         for d in DIRECTIONS:
             nc = (goal[0] + DIRECTIONS[d][0], goal[1] + DIRECTIONS[d][1])
             passages.discard(edge(goal, nc))
@@ -140,4 +199,11 @@ def make_maze(
     maze.reachable = reachable
     maze.shortest_path_length = dist
     maze.reachable_component_size = len(reachable_component(maze))
+    if label == MazeLabel.UNSOLVABLE:
+        # The point of the repairs: search cost is a property of the size, not
+        # of where the carve happened to put the goal.
+        assert maze.reachable_component_size == rows * cols - 1, (
+            "sealing the goal orphaned part of the grid: "
+            f"{maze.reachable_component_size} of {rows * cols - 1} cells reachable"
+        )
     return maze
