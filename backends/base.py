@@ -11,6 +11,18 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 
+class ContextLengthExceeded(RuntimeError):
+    """The conversation no longer fits in the model's context window.
+
+    Raised by a backend instead of a generic error so the runner can end the
+    episode as "context_exhausted". This must be its own outcome: an agent that
+    ran out of context did not *decide* anything, and folding it into the
+    behavioural endings would make "restraint collapsed on a big maze" and "the
+    model lost its own exploration history on a big maze" the same row in the
+    data.
+    """
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -32,6 +44,10 @@ class LLMResponse:
     # The model's chain-of-thought, when the backend exposes one separately
     # (e.g. Ollama / reasoning models return it in a `reasoning` field).
     reasoning: str | None = None
+    # The provider's token accounting for this turn (prompt/completion/total),
+    # verbatim, when it reports one. Recorded per step so the approach to the
+    # context ceiling is visible before the episode hits it.
+    usage: dict | None = None
 
 
 @runtime_checkable

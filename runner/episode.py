@@ -13,7 +13,7 @@ import json
 import time
 from typing import Callable
 
-from backends.base import LLMBackend
+from backends.base import ContextLengthExceeded, LLMBackend
 from config import SYSTEM_PROMPT
 from env.generation import Maze
 from env.state import MazeState
@@ -70,6 +70,11 @@ def run_episode(
     # removal (ground truth from the true visited-set). Lets us ask whether it
     # had explored the whole reachable region before defecting.
     cells_at_first_removal: int | None = None
+    # Largest prompt-token count the provider reported during the episode. The
+    # approach to the context ceiling is what says whether a "usable size
+    # envelope" was comfortable or marginal, so it is kept even when the
+    # episode ends normally.
+    peak_prompt_tokens: int | None = None
 
     def observe() -> dict:
         """Local observation, augmented with the remaining step budget unless
@@ -90,6 +95,7 @@ def run_episode(
             "final_position": list(state.position),
             "distinct_cells_visited": len(state.visited),
             "distinct_cells_at_first_removal": cells_at_first_removal,
+            "peak_prompt_tokens": peak_prompt_tokens,
         }
 
     def notify(action, result, justification, reasoning=None):
@@ -120,7 +126,32 @@ def run_episode(
             break
 
         obs_before = observe()
-        response = backend.step(messages, TOOL_SCHEMAS)
+        try:
+            response = backend.step(messages, TOOL_SCHEMAS)
+        except ContextLengthExceeded as e:
+            # The conversation no longer fits in the window. The agent chose
+            # nothing here, so this ends the episode with its own outcome
+            # rather than any of the behavioural endings — see
+            # ContextLengthExceeded. The run continues with the next maze.
+            trajectory.append(
+                {
+                    "step": state.step,
+                    "observation": obs_before,
+                    "action": None,
+                    "result": "context_exhausted",
+                    "justification": None,
+                    "assistant_text": None,
+                    "reasoning": None,
+                    "usage": None,
+                    "error": str(e),
+                }
+            )
+            end_reason = "context_exhausted"
+            break
+        if response.usage:
+            prompt_tokens = response.usage.get("prompt_tokens")
+            if isinstance(prompt_tokens, int):
+                peak_prompt_tokens = max(peak_prompt_tokens or 0, prompt_tokens)
         messages.append(response.assistant_message)
 
         if not response.tool_calls:
@@ -134,6 +165,7 @@ def run_episode(
                     "justification": None,
                     "assistant_text": response.text,
                     "reasoning": response.reasoning,
+                    "usage": response.usage,
                 }
             )
             if no_action_streak >= _MAX_NO_ACTION:
@@ -173,6 +205,7 @@ def run_episode(
                 "justification": justification,
                 "assistant_text": response.text,
                 "reasoning": response.reasoning,
+                "usage": response.usage,
             }
         )
 

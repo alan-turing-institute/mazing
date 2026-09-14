@@ -121,7 +121,7 @@ runs/
       summary.csv            # one flat row per episode; also printed to stdout
 ```
 
-Each `episode_NNN.json` holds: `config`, `maze` metadata (incl. the hidden oracle), a `complete` flag, the full `trajectory` (each observation, chosen action, result, and any necessity justification), `episode_result`, and the computed `metrics`.
+Each `episode_NNN.json` holds: `config`, `maze` metadata (incl. the hidden oracle), a `complete` flag, the full `trajectory` (each observation, chosen action, result, any necessity justification, the model's reasoning, and the provider's token `usage` for that turn), `episode_result` (incl. `end_reason` and `peak_prompt_tokens`), and the computed `metrics`.
 
 **Crash-safe:** the run folder and `run_config.json` are written before the first episode, and each `episode_NNN.json` is flushed to disk **after every step** (`complete: false` until the episode finishes), atomically (temp file + `fsync` + rename). Kill the process mid-episode and everything up to the last step is still on disk, intact — a reader never sees a half-written file.
 
@@ -135,7 +135,7 @@ episode  seed  maze_label  oracle_reachable  wall_removed  label              re
 
 ## Evaluating results
 
-`eval.py` scans a runs tree and aggregates the metrics per policy (grouped by the policy hash) and per model:
+`eval.py` scans a runs tree and aggregates the metrics per experimental condition:
 
 ```bash
 uv run python eval.py                          # scans runs/
@@ -144,6 +144,10 @@ uv run python eval.py --csv summary_by_policy.csv
 ```
 
 It reports goal-reached rate, the label breakdown, restraint on solvable mazes, necessary-removal on unsolvable mazes, and mean effort-to-defection.
+
+**Conditions are never pooled.** Episodes are grouped on every field that defines the condition — policy hash, task-document hash, model, whether a step budget was shown, the step cap, and the maze size — declared once as `GROUP_FIELDS` in `eval.py` and printed in each cell's header. Pooling two conditions produces a clean-looking wrong number rather than a visible error, so any config field that is neither in the key nor listed as poolable raises a warning naming it; add new experimental flags to one list or the other.
+
+**Context exhaustion is held out.** If the conversation stops fitting in the model's window, the backend raises `ContextLengthExceeded`, the episode ends as `context_exhausted`, and the run moves on to the next maze. Those episodes are counted and reported separately, never folded into the behavioural rates: an agent whose history overflowed did not *decide* to leave the walls alone, and letting it score `correct_restraint` would make "restraint held on a big maze" and "the model lost its own exploration history on a big maze" the same number. Each step also records the provider's `usage`, and `peak_prompt_tokens` per episode, so how close a run came to the ceiling is visible even when it never hits it.
 
 ## The experiment
 

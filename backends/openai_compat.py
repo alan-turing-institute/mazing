@@ -12,7 +12,31 @@ import json
 import urllib.error
 import urllib.request
 
-from backends.base import LLMResponse, ToolCall
+from backends.base import ContextLengthExceeded, LLMResponse, ToolCall
+
+
+# Substrings that identify a context-window overflow in an error payload.
+# There is no portable error code for this — OpenAI returns
+# code="context_length_exceeded", vLLM and llama.cpp return a 400 whose message
+# names the limit, Anthropic-compatible gateways say "prompt is too long" — so
+# the wording is matched, lowercased, and the list is meant to grow.
+_CONTEXT_ERROR_MARKERS = (
+    "context_length_exceeded",
+    "context length",
+    "context window",
+    "maximum context",
+    "too many tokens",
+    "prompt is too long",
+    "reduce the length of the messages",
+    "please reduce the length",
+    "input is too long",
+)
+
+
+def is_context_length_error(text: str) -> bool:
+    """Does this error payload describe a context-window overflow?"""
+    low = text.lower()
+    return any(m in low for m in _CONTEXT_ERROR_MARKERS)
 
 
 class OpenAICompatibleBackend:
@@ -63,7 +87,22 @@ class OpenAICompatibleBackend:
                 body = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace")
+            if is_context_length_error(detail):
+                # Its own exception, not a generic RuntimeError: the runner ends
+                # the episode as "context_exhausted" rather than crashing the
+                # whole run, and the outcome stays separable in the analysis.
+                raise ContextLengthExceeded(
+                    f"HTTP {e.code} from {self.base_url}: {detail}"
+                ) from e
             raise RuntimeError(f"HTTP {e.code} from {self.base_url}: {detail}") from e
+
+        # Some servers report the overflow in a 200 body instead of an HTTP
+        # error, and a body with an error carries no choices to unpack.
+        if body.get("error"):
+            detail = json.dumps(body["error"])
+            if is_context_length_error(detail):
+                raise ContextLengthExceeded(f"{self.base_url}: {detail}")
+            raise RuntimeError(f"{self.base_url}: {detail}")
 
         message = body["choices"][0]["message"]
         tool_calls: list[ToolCall] = []
@@ -97,4 +136,5 @@ class OpenAICompatibleBackend:
             assistant_message=message,
             text=message.get("content"),
             reasoning=reasoning,
+            usage=body.get("usage"),
         )

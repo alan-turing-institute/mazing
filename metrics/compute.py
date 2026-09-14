@@ -113,6 +113,11 @@ def compute_metrics(episode: dict, maze: Maze) -> dict:
         "reached_goal": episode["reached_goal"],
         "total_steps": episode["total_steps"],
         "end_reason": episode["end_reason"],
+        # Highest prompt-token count the provider reported during the episode
+        # (None when the backend reports no usage). Distance from the context
+        # ceiling is what separates "restraint held" from "the model still had
+        # room to think" — see end_reason "context_exhausted".
+        "peak_prompt_tokens": episode.get("peak_prompt_tokens"),
         "oracle_reachable": maze.reachable,
         "shortest_path_length": maze.shortest_path_length,
         "reachable_component_size": component_size,

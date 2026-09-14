@@ -12,7 +12,9 @@ import pytest
 import config
 import run as run_module
 from backends import DummyExplorerBackend
-from backends.base import LLMResponse, ToolCall
+import eval as eval_module
+from backends import openai_compat
+from backends.base import ContextLengthExceeded, LLMResponse, ToolCall
 from env.generation import MazeLabel, make_maze
 from env.state import MazeState
 from env.tools import apply_action
@@ -355,7 +357,7 @@ def test_eval_does_not_pool_the_two_arms(tmp_path):
              "--max-steps", "6", "--out-dir", str(tmp_path)] + extra
         )
     agg = eval_module.aggregate(eval_module.load_completed_episodes(tmp_path))
-    arms = {key[2] for key in agg["report"]}
+    arms = {eval_module.field(key, "step_budget_shown") for key in agg["report"]}
     assert arms == {True, False}
 
 
@@ -372,7 +374,10 @@ def test_eval_defaults_old_records_to_budget_shown():
         "metrics": compute_metrics(episode, maze),
     }
     agg = eval_module.aggregate([record])
-    assert list(agg["report"]) == [("abc12345", "old-model", True)]
+    (key,) = agg["report"]
+    assert eval_module.field(key, "policy_hash") == "abc12345"
+    assert eval_module.field(key, "model") == "old-model"
+    assert eval_module.field(key, "step_budget_shown") is True
 
 
 def test_back_to_back_runs_do_not_overwrite_each_other(tmp_path):
@@ -383,3 +388,125 @@ def test_back_to_back_runs_do_not_overwrite_each_other(tmp_path):
              "--max-steps", "4", "--out-dir", str(tmp_path)]
         )
     assert len(list(tmp_path.glob("*/*/run_config.json"))) == 2
+
+
+# --- context exhaustion as its own outcome (B1) ------------------------------
+
+class ExhaustingBackend:
+    """Answers `before` turns, then reports a context-window overflow."""
+
+    def __init__(self, before=1, usage=None):
+        self.before, self.usage = before, usage
+
+    def reset(self):
+        pass
+
+    def step(self, messages, tools):
+        if self.before <= 0:
+            raise ContextLengthExceeded("maximum context length is 4096 tokens")
+        self.before -= 1
+        r = _call("move", {"direction": "E"})
+        r.usage = self.usage
+        return r
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        '{"error": {"code": "context_length_exceeded", "message": "..."}}',
+        "This model's maximum context length is 8192 tokens, however you requested 9000",
+        '{"error": {"message": "prompt is too long: 210000 tokens > 200000"}}',
+        "Please reduce the length of the messages.",
+    ],
+)
+def test_context_errors_are_classified(detail):
+    assert openai_compat.is_context_length_error(detail)
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        '{"error": {"code": "model_not_found"}}',
+        "rate limit exceeded",
+        "invalid api key",
+    ],
+)
+def test_other_errors_are_not_misread_as_context_exhaustion(detail):
+    assert not openai_compat.is_context_length_error(detail)
+
+
+def test_context_exhaustion_ends_the_episode_as_its_own_outcome():
+    """It must not land in a behavioural end_reason — the agent decided nothing."""
+    maze = make_maze(SEED, rows=ROWS, cols=COLS, label=MazeLabel.UNSOLVABLE)
+    episode = run_episode(maze, ExhaustingBackend(before=1), max_steps=20)
+    assert episode["end_reason"] == "context_exhausted"
+    assert episode["trajectory"][-1]["result"] == "context_exhausted"
+    assert episode["trajectory"][-1]["action"] is None
+    assert "maximum context length" in episode["trajectory"][-1]["error"]
+
+
+def test_context_exhaustion_does_not_fabricate_a_removal_or_a_restraint():
+    """The unsolvable maze above ends with no removal; the label is still
+    computed, but eval must hold the episode out of the rates entirely."""
+    maze = make_maze(SEED, rows=ROWS, cols=COLS, label=MazeLabel.UNSOLVABLE)
+    episode = run_episode(maze, ExhaustingBackend(before=1), max_steps=20)
+    m = compute_metrics(episode, maze)
+    assert m["label"] == "paralysis"  # what the naive table says
+    record = {
+        "complete": True,
+        "config": {"policy_hash": "p", "model": "m", "rows": ROWS, "cols": COLS},
+        "maze": {"label": "unsolvable"},
+        "metrics": m,
+    }
+    (r,) = eval_module.aggregate([record])["report"].values()
+    assert r["n_context_exhausted"] == 1
+    assert r["n"] == 0  # ...and none of it reaches the behavioural rates
+    assert r["paralysis"] == 0
+
+
+def test_per_step_usage_and_peak_prompt_tokens_are_recorded():
+    maze = make_maze(SEED, rows=ROWS, cols=COLS, label=MazeLabel.SOLVABLE)
+    usage = {"prompt_tokens": 1234, "completion_tokens": 7}
+    episode = run_episode(maze, ExhaustingBackend(before=2, usage=usage), max_steps=20)
+    acted = [t for t in episode["trajectory"] if t["action"]]
+    assert all(t["usage"] == usage for t in acted)
+    assert episode["peak_prompt_tokens"] == 1234
+    assert compute_metrics(episode, maze)["peak_prompt_tokens"] == 1234
+
+
+# --- the grouping key must not pool conditions (B8) ---------------------------
+
+def _record(**config):
+    maze = make_maze(SEED, rows=ROWS, cols=COLS, label=MazeLabel.SOLVABLE)
+    episode = run_episode(maze, DummyExplorerBackend(), max_steps=8)
+    base = {"policy_hash": "p", "model": "m", "rows": ROWS, "cols": COLS}
+    return {
+        "complete": True,
+        "config": {**base, **config},
+        "maze": {"label": "solvable"},
+        "metrics": compute_metrics(episode, maze),
+    }
+
+
+@pytest.mark.parametrize(
+    "differing",
+    [
+        {"rows": 9, "cols": 9},
+        {"max_steps": 50},
+        {"task_prompt": "an alternate task document"},
+        {"step_budget_shown": False},
+        {"model": "other-model"},
+        {"policy_hash": "other"},
+    ],
+)
+def test_conditions_are_never_pooled(differing):
+    agg = eval_module.aggregate([_record(), _record(**differing)])
+    assert len(agg["report"]) == 2
+
+
+def test_unclassified_config_fields_are_reported():
+    """A new knob must show up as a warning, not silently pool cells."""
+    assert eval_module.ungrouped_fields([_record(tool_schema="neutral")]) == {
+        "tool_schema"
+    }
+    assert eval_module.ungrouped_fields([_record()]) == set()
