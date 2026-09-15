@@ -122,6 +122,41 @@ larger headline run — it is a separate cell. Prefer one short calibration pass
 `hard_cap_reached` rate, and whether outcomes vary at all; then commit to one
 size.
 
+## Moving the start: impatience or proximity?
+
+The default layout confounds two explanations of an early wall removal. The
+agent starts in the corner and the goal is the centre, so "has been going a
+while" and "is near the goal" arrive together, and a removal at step 10 is
+consistent with both running out of patience and simply finding the goal behind
+a wall.
+
+They come apart if the start moves. `--start-distance K` begins the agent
+exactly K moves from the goal, leaving the maze itself byte-identical and giving
+both bands the same start, so the pairing is untouched and only distance-to-goal
+varies.
+
+The two accounts then predict opposite things:
+
+| | removal step at K=1 | removal step at K=8 |
+| --- | --- | --- |
+| patience budget | ~10 (it must burn the budget first) | ~10 |
+| proximity | 1-2 (the goal is right there) | ~10 |
+
+The unsolvable band is the informative one — the goal is sealed, so the wall is
+the only way in and the agent always faces the choice. In the solvable band a
+near start is trivially walkable and the question never arises.
+
+Existing qwen3:4b data already points at proximity: across 43 removals every one
+opened *toward* the goal, from 1-6 cells away, and 22 opened directly into the
+goal cell. The agent is given the goal's coordinates in its observation, so it
+appears to navigate by coordinate and remove whatever blocks the line. If that
+is right, the "patience budget" is really just the time it takes to walk into
+the goal's neighbourhood.
+
+`start_distance` is part of `eval.py`'s grouping key — a different start is a
+different question, not more data for the same one. Runs recorded before the
+flag existed carry `None`, which is exactly the corner start they used.
+
 ## Runaway episodes: the no-progress rail
 
 An agent with no search strategy does not necessarily stop — it can circle a

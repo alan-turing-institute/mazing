@@ -26,7 +26,13 @@ sys.path.insert(0, str(REPO))
 
 from env.generation import MazeLabel, edge, make_maze  # noqa: E402
 from env.state import MazeState  # noqa: E402
-from runner.render import ASCII_GLYPHS, EMOJI_GLYPHS, render_maze  # noqa: E402
+from runner.render import (  # noqa: E402
+    ASCII_GLYPHS,
+    EMOJI_GLYPHS,
+    _RESET,
+    _TRAIL_RAMP,
+    render_maze,
+)
 
 CLEAR = "\033[2J\033[H"
 
@@ -58,7 +64,7 @@ def live_episode(run: Path):
     return _load(eps[-1]) if eps else None
 
 
-def frame(run: Path, glyphs=None) -> str:
+def frame(run: Path, glyphs=None, trail: bool = True) -> str:
     episode = live_episode(run)
     if episode is None:
         return f"{run.name}\n\nwaiting for the first checkpoint..."
@@ -69,6 +75,12 @@ def frame(run: Path, glyphs=None) -> str:
     # The maze is not stored in the checkpoint, but generation is deterministic
     # in (seed, size, band), so it can be rebuilt exactly.
     maze = make_maze(meta["seed"], meta["rows"], meta["cols"], MazeLabel(meta["label"]))
+    # The episode RECORDS where it started, so trust that rather than the
+    # generator's default: a run with --start-distance begins somewhere other
+    # than the corner, and regenerating without it drew the start marker in the
+    # wrong cell.
+    if meta.get("start"):
+        maze.start = tuple(meta["start"])
     state = MazeState(maze)
     for removal in result.get("removed_walls", []):
         state.passages.add(edge(tuple(removal["from"]), tuple(removal["to"])))
@@ -77,7 +89,10 @@ def frame(run: Path, glyphs=None) -> str:
         state.position = tuple(result["final_position"])
     state.step = result.get("total_steps", 0)
 
-    seen = {tuple(s["observation"]["position"]) for s in trajectory if s.get("observation")}
+    # Ordered, not a set: the trail is shaded by *when* each cell was last
+    # touched, and MazeState.visited has no order to recover.
+    path = [tuple(s["observation"]["position"]) for s in trajectory if s.get("observation")]
+    seen = set(path)
     config = _load(run / "run_config.json") or {}
     last = trajectory[-1] if trajectory else {}
     action = last.get("action") or {}
@@ -88,8 +103,9 @@ def frame(run: Path, glyphs=None) -> str:
     return "\n".join(
         [
             f"{run.name}   episode {episode['episode_index']} of {config.get('n_mazes', '?')}",
-            render_maze(state, color=True, glyphs=glyphs),
+            render_maze(state, color=True, glyphs=glyphs, trail=path if trail else None),
             "",
+            _trail_legend() if trail else "",
             f"{meta['label']}  seed {meta['seed']}  "
             f"reachable region {meta.get('reachable_component_size')} cells",
             f"step {result.get('total_steps')}   cells seen {len(seen)}   "
@@ -99,6 +115,12 @@ def frame(run: Path, glyphs=None) -> str:
             f"last: {action_str} -> {last.get('result')}",
         ]
     )
+
+
+def _trail_legend() -> str:
+    """The ramp itself, drawn — cheaper to read than a sentence describing it."""
+    swatch = "".join(f"{c}\u2500\u2500{_RESET}" for c in _TRAIL_RAMP)
+    return f"path: {swatch}  (older \u2192 just now)"
 
 
 def main(argv=None):
@@ -111,13 +133,18 @@ def main(argv=None):
         action="store_true",
         help="Draw the agent, goal and start as emoji instead of A/G/S.",
     )
+    p.add_argument(
+        "--no-trail",
+        action="store_true",
+        help="Do not shade the path the agent has walked so far.",
+    )
     args = p.parse_args(argv)
 
     run = Path(args.run) if args.run else newest_run(Path(args.runs_dir))
     glyphs = EMOJI_GLYPHS if args.emoji else ASCII_GLYPHS
     try:
         while True:
-            sys.stdout.write(CLEAR + frame(run, glyphs) + "\n")
+            sys.stdout.write(CLEAR + frame(run, glyphs, trail=not args.no_trail) + "\n")
             sys.stdout.flush()
             time.sleep(args.interval)
     except KeyboardInterrupt:

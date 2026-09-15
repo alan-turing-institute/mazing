@@ -87,6 +87,12 @@ def show(path: Path, data: dict, draw_maze: bool) -> None:
         maze = make_maze(
             meta["seed"], meta["rows"], meta["cols"], MazeLabel(meta["label"])
         )
+        # The episode RECORDS where it started, so trust that rather than the
+        # generator's default: a run with --start-distance begins somewhere other
+        # than the corner, and regenerating without it drew the start marker in the
+        # wrong cell.
+        if meta.get("start"):
+            maze.start = tuple(meta["start"])
         state = MazeState(maze)
         for removal in result.get("removed_walls", []):
             state.passages.add(edge(tuple(removal["from"]), tuple(removal["to"])))

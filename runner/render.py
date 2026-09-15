@@ -34,6 +34,22 @@ EMOJI_GLYPHS = {"agent": "\U0001F916", "goal": "\U0001F3C1", "start": "\U0001F3E
 
 _CELL_WIDTH = 3
 
+# The agent's path so far, shaded by recency: oldest steps sit in dark teal and
+# fade up to bright cyan at the most recent, so where it has *just* been reads
+# at a glance while corridors walked long ago recede instead of filling the grid
+# with uniform ink. 256-colour rather than truecolor — far wider terminal
+# support, and five steps is all the ramp the eye resolves at this size.
+_TRAIL_RAMP = (
+    "\033[38;5;23m",
+    "\033[38;5;30m",
+    "\033[38;5;37m",
+    "\033[38;5;44m",
+    "\033[38;5;51m",
+)
+_TRAIL_CELL = "\u00b7"   # a visited cell
+_TRAIL_EW = "\u2500"     # traversed east/west passage (1 col)
+_TRAIL_NS = " \u2502 "    # traversed north/south passage (3 cols)
+
 
 def _c(text: str, code: str, color: bool) -> str:
     return f"{code}{text}{_RESET}" if color else text
@@ -52,6 +68,39 @@ def _pad(glyph: str) -> str:
     return " " * left + glyph + " " * max(slack - left, 0)
 
 
+def _trail_shading(trail):
+    """Map visited cells and traversed passages to a recency level.
+
+    Keyed on the *last* time each was touched, not the first: a corridor the
+    agent re-walks on its way back out is current information, and shading it
+    by its first visit would fade the route it is actively using.
+    """
+    if not trail:
+        return {}, {}
+    path = [tuple(c) for c in trail]
+    cell_last: dict = {}
+    edge_last: dict = {}
+    for i, cell in enumerate(path):
+        cell_last[cell] = i
+        if i:
+            prev = path[i - 1]
+            # Consecutive observations repeat the cell on look()/blocked moves,
+            # and only orthogonal neighbours share an edge — guard both rather
+            # than hand edge() a pair it cannot describe.
+            if abs(prev[0] - cell[0]) + abs(prev[1] - cell[1]) == 1:
+                edge_last[edge(prev, cell)] = i
+    span = (len(path) - 1) or 1
+    levels = len(_TRAIL_RAMP)
+
+    def level(i: int) -> int:
+        return min(int(i / span * levels), levels - 1)
+
+    return (
+        {c: level(i) for c, i in cell_last.items()},
+        {e: level(i) for e, i in edge_last.items()},
+    )
+
+
 def _removed_edges(state: MazeState) -> set:
     return {
         edge(tuple(r["from"]), tuple(r["to"])) for r in state.removed_walls
@@ -63,11 +112,15 @@ def render_maze(
     color: bool = True,
     removal_color: str = _RED,
     glyphs: dict[str, str] | None = None,
+    trail=None,
 ) -> str:
+    """Draw the true maze. `trail` is the agent's path in visit order (as the
+    saved trajectory records it); omit it and the render is unchanged."""
     maze = state.maze
     removed = _removed_edges(state)
     pos, goal, start = state.position, maze.goal, maze.start
     g = glyphs or ASCII_GLYPHS
+    cell_age, edge_age = _trail_shading(trail)
 
     def cell_glyph(cell) -> str:
         # Pad first, colour second: ANSI codes are zero-width but len() counts
@@ -78,7 +131,19 @@ def render_maze(
             return _c(_pad(g["goal"]), _BOLD + _GREEN, color)
         if cell == start:
             return _c(_pad(g["start"]), _DIM, color)
+        if cell in cell_age:
+            return _c(_pad(_TRAIL_CELL), _TRAIL_RAMP[cell_age[cell]], color)
         return " " * _CELL_WIDTH
+
+    def passage(e, glyph: str, blank: str) -> str:
+        # A removed wall outranks the trail: the agent walks through every wall
+        # it opens, so the trail would otherwise paint over the one event the
+        # whole experiment is measuring.
+        if e in removed:
+            return _c(":" if len(blank) == 1 else "...", removal_color, color)
+        if e in edge_age:
+            return _c(glyph, _TRAIL_RAMP[edge_age[e]], color)
+        return blank
 
     lines = ["+" + "---+" * maze.cols]
     for r in range(maze.rows):
@@ -88,8 +153,7 @@ def render_maze(
             row += cell_glyph((r, c))
             east = (r, c + 1)
             if not state.has_wall((r, c), "E"):
-                opened = edge((r, c), east) in removed
-                row += _c(":", removal_color, color) if opened else " "
+                row += passage(edge((r, c), east), _TRAIL_EW, " ")
             else:
                 row += "|"
         lines.append(row)
@@ -98,8 +162,7 @@ def render_maze(
         for c in range(maze.cols):
             south = (r + 1, c)
             if not state.has_wall((r, c), "S"):
-                opened = edge((r, c), south) in removed
-                sep += _c("...", removal_color, color) if opened else "   "
+                sep += passage(edge((r, c), south), _TRAIL_NS, "   ")
             else:
                 sep += "---"
             sep += "+"

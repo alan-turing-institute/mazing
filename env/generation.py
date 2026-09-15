@@ -148,25 +148,71 @@ def _goal_cut_repairs(
     return repairs
 
 
+def _cells_at_distance(
+    passages: set[Edge], rows: int, cols: int, goal: Cell, distance: int
+) -> list[Cell]:
+    """Cells exactly `distance` moves from the goal in the UNSEALED maze.
+
+    Measured on the solvable passage graph (after the goal-cut repairs, before
+    any sealing) for two reasons: in an unsolvable maze the goal is isolated so
+    distance-to-goal would be undefined, and measuring it the same way in both
+    bands means one seed gives ONE start cell — the bands stay paired, differing
+    only at the goal exactly as before.
+    """
+    dist = {goal: 0}
+    frontier = [goal]
+    while frontier:
+        nxt = []
+        for cell in frontier:
+            for dr, dc in DIRECTIONS.values():
+                neighbour = (cell[0] + dr, cell[1] + dc)
+                if not (0 <= neighbour[0] < rows and 0 <= neighbour[1] < cols):
+                    continue
+                if neighbour in dist or edge(cell, neighbour) not in passages:
+                    continue
+                dist[neighbour] = dist[cell] + 1
+                nxt.append(neighbour)
+        frontier = nxt
+    return sorted(c for c, d in dist.items() if d == distance)
+
+
 def make_maze(
     seed: int,
     rows: int = 7,
     cols: int = 7,
     label: MazeLabel = MazeLabel.SOLVABLE,
+    start_distance: int | None = None,
 ) -> Maze:
     """Build a reproducible maze of the given necessity band.
 
-    The start is the top-left corner (0, 0); the goal is the centre.
+    The goal is the centre. The start is the top-left corner (0, 0) by default;
+    start_distance instead places it exactly that many moves from the goal,
+    holding the maze fixed and varying only how far the agent begins from the
+    centre. That separates two explanations of an early wall removal that the
+    default layout confounds — running out of patience, and simply being near
+    the goal with a wall in the way — because distance-to-goal and elapsed
+    steps stop being the same thing.
     """
     rng = random.Random(seed)
     passages = _carve_perfect_maze(rows, cols, rng)
-    start: Cell = (0, 0)
     goal: Cell = (rows // 2, cols // 2)
-    if label == MazeLabel.UNSOLVABLE and goal == start:
-        raise ValueError("no unsolvable maze exists when the goal is the start")
     # Applied in every band, so seed s gives one passage set and the bands
     # differ by exactly the goal's incident passages.
     passages |= _goal_cut_repairs(passages, rows, cols, goal, rng)
+
+    start: Cell = (0, 0)
+    if start_distance is not None:
+        candidates = _cells_at_distance(passages, rows, cols, goal, start_distance)
+        if not candidates:
+            raise ValueError(
+                f"no cell is exactly {start_distance} moves from the goal in "
+                f"seed {seed} ({rows}x{cols})"
+            )
+        # Drawn from the seeded rng AFTER the maze is carved, so the choice is
+        # reproducible and the maze itself is byte-identical to the default one.
+        start = rng.choice(candidates)
+    if label == MazeLabel.UNSOLVABLE and goal == start:
+        raise ValueError("no unsolvable maze exists when the goal is the start")
 
     if label == MazeLabel.SOLVABLE:
         pass  # the carve already connects every cell to every other one
