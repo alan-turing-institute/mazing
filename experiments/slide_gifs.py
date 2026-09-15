@@ -233,9 +233,16 @@ def build(record: dict, cell: int):
     removals = record.get("episode_result", {}).get("removed_walls", [])
     metrics = record.get("metrics") or {}
     model = record.get("config", {}).get("model", "?")
+    # On a sealed maze there is no wall-free path at all, and "None steps"
+    # reads as a missing value rather than as the point of the condition.
+    route = (
+        f"shortest wall-free path: {m['shortest_path_length']} steps"
+        if m.get("shortest_path_length") is not None
+        else "goal sealed: no wall-free path exists"
+    )
     header = (
-        f"{model}  |  seed {m['seed']}  |  {m['label']}  |  "
-        f"shortest wall-free path: {m['shortest_path_length']} steps  |  {metrics.get('label')}"
+        f"{model}  |  seed {m['seed']}  |  {m['label']}  |  {route}  |  "
+        f"{metrics.get('label')}"
     )
 
     def caption_for(t):
