@@ -106,6 +106,22 @@ def make_backend(args):
             tool_choice="auto",
             timeout=args.request_timeout,
         )
+    if args.backend == "anthropic":
+        if not args.model:
+            sys.exit("--model is required for --backend anthropic")
+        # Foundry serves Claude over the Anthropic Messages API, which is a
+        # different wire format from --backend openai, not a variant of it.
+        from backends.anthropic_foundry import AnthropicFoundryBackend
+
+        return AnthropicFoundryBackend(
+            model=args.model,
+            base_url=args.base_url,
+            api_key=args.api_key or os.environ.get("ANTHROPIC_API_KEY"),
+            max_tokens=args.max_tokens,
+            tool_choice=args.tool_choice,
+            effort=args.effort,
+            timeout=args.request_timeout,
+        )
     if args.backend == "openai":
         if not args.model:
             sys.exit("--model is required for --backend openai")
@@ -164,7 +180,37 @@ def print_summary(rows: list[dict]) -> None:
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--backend", default="dummy", choices=["dummy", "ollama", "openai"])
+    p.add_argument(
+        "--backend",
+        default="dummy",
+        choices=["dummy", "ollama", "openai", "anthropic"],
+    )
+    p.add_argument(
+        "--max-tokens",
+        type=int,
+        default=8192,
+        help="Max tokens per response (--backend anthropic, where the API "
+        "requires it). Must leave room for adaptive thinking as well as the "
+        "tool call, or turns truncate mid-thought.",
+    )
+    p.add_argument(
+        "--tool-choice",
+        default="auto",
+        choices=["auto", "any"],
+        help="Whether the model is forced to call a tool each turn "
+        "(--backend anthropic). 'any' forces one, but suppresses extended "
+        "thinking entirely on Claude, so the trajectory records no reasoning; "
+        "'auto' (default) keeps thinking and is what the local-model baseline "
+        "used. Part of the condition, so it is recorded and never pooled.",
+    )
+    p.add_argument(
+        "--effort",
+        default=None,
+        choices=["low", "medium", "high", "xhigh", "max"],
+        help="Reasoning effort (--backend anthropic). Omit to use the model "
+        "default; it is recorded in run_config.json either way, and it is part "
+        "of the condition, so do not change it mid-experiment.",
+    )
     p.add_argument(
         "--dummy-policy",
         default="explorer",
@@ -228,6 +274,16 @@ def main(argv=None):
         "a cell it has never visited, as 'no_progress'. A safety rail for "
         "agents that circle a few cells forever; a trigger flags an episode "
         "for review rather than deciding anything. Omit (or 0) to disable.",
+    )
+    p.add_argument(
+        "--start-distance",
+        type=int,
+        default=None,
+        help="Start the agent exactly this many moves from the goal instead of "
+        "in the top-left corner. The maze is unchanged and both bands get the "
+        "same start, so this varies distance-to-goal while holding everything "
+        "else fixed — it separates 'removed a wall because it ran out of "
+        "patience' from 'removed a wall because the goal was right there'.",
     )
     p.add_argument("--rows", type=int, default=config.DEFAULT_ROWS)
     p.add_argument("--cols", type=int, default=config.DEFAULT_COLS)
@@ -327,6 +383,12 @@ def main(argv=None):
         "max_steps": args.max_steps,
         "request_timeout": args.request_timeout,
         "max_idle_steps": args.max_idle_steps,
+        "start_distance": args.start_distance,
+        # Anthropic-backend knobs. Recorded unconditionally (None elsewhere) so
+        # a run is self-describing and eval.py can key on them.
+        "max_tokens": args.max_tokens if args.backend == "anthropic" else None,
+        "effort": args.effort if args.backend == "anthropic" else None,
+        "tool_choice": args.tool_choice if args.backend == "anthropic" else None,
         "step_budget_shown": include_budget,
         "rows": args.rows,
         "cols": args.cols,
@@ -363,6 +425,10 @@ def main(argv=None):
                     # episode completes, and a killed episode is exactly the one
                     # whose token accounting you want to read.
                     "peak_prompt_tokens",
+                    # Why an episode stalled is exactly what a killed or
+                    # rail-terminated episode needs to carry.
+                    "longest_idle_run",
+                    "stall",
                 )
             },
             "metrics": compute_metrics(episode, maze) if complete else None,
@@ -371,7 +437,13 @@ def main(argv=None):
     print(f"Writing results to {out_dir}/ (saved after every step)")
     summary_rows = []
     for i, (mseed, label) in enumerate(specs):
-        maze = make_maze(mseed, rows=args.rows, cols=args.cols, label=label)
+        maze = make_maze(
+            mseed,
+            rows=args.rows,
+            cols=args.cols,
+            label=label,
+            start_distance=args.start_distance,
+        )
         episode_path = out_dir / f"episode_{i:03d}.json"
 
         watcher = None
@@ -395,6 +467,7 @@ def main(argv=None):
             maze,
             backend,
             max_steps=args.max_steps,
+            max_idle_steps=args.max_idle_steps or None,
             system_prompt=system_prompt,
             show_step_budget=include_budget,
             on_step=watcher,
