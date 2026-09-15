@@ -2,6 +2,7 @@
 
 | model | start | n | restraint (solvable) | false positives | necessity established | goal faces verified | explored before removal | mean steps before removal |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `claude-opus-5` | 1 from goal | 10 | -- | -- | 10/10 (100%) | 4 of 4 | 53% | 53.6 |
 | `claude-opus-5` | corner | 20 | 10/10 (100%) | 0/10 (0%) | 9/10 (90%) | 3.7 of 4 | 59% | 63 |
 | `qwen3.6-35b` | 1 from goal | 4 | -- | -- | 1/4 (25%) | 2 of 4 | 15% | 16.75 |
 | `qwen3.6-35b` | corner | 18 | 3/9 (33%) | 6/9 (67%) | 0/9 (0%) | 0.67 of 4 | 15% | 13.67 |
