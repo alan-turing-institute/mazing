@@ -8,6 +8,8 @@ base URL, and API key are all configurable.
 
 from __future__ import annotations
 
+import datetime as dt
+import email.utils
 import http.client
 import json
 import sys
@@ -54,6 +56,8 @@ class OpenAICompatibleBackend:
         timeout: float = 600.0,
         max_retries: int = 3,
         retry_backoff: float = 2.0,
+        max_rate_limit_retries: int = 8,
+        max_retry_after: float = 300.0,
     ):
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -64,6 +68,11 @@ class OpenAICompatibleBackend:
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_backoff = retry_backoff
+        # Throttling gets its own, larger budget: a hosted endpoint can 429 many
+        # times across a long run without anything being wrong, and those
+        # retries must not eat the budget meant for a genuinely sick server.
+        self.max_rate_limit_retries = max_rate_limit_retries
+        self.max_retry_after = max_retry_after
 
     def reset(self) -> None:  # stateless
         pass
@@ -77,8 +86,38 @@ class OpenAICompatibleBackend:
         http.client.HTTPException,
     )
 
+    def _retry_after_seconds(self, headers) -> float | None:
+        """Seconds to wait per the server's Retry-After, if it sent a usable one.
+
+        RFC 9110 allows either a delay in seconds or an HTTP date, and hosted
+        endpoints send both spellings. A server that names a number knows its own
+        throttle better than any backoff curve we could invent, so it wins — but
+        it is capped, because an endpoint parked behind a multi-hour quota reset
+        should surface as a failed run, not a process that looks alive for hours.
+        """
+        raw = headers.get("Retry-After") if headers else None
+        if not raw:
+            return None
+        raw = raw.strip()
+        try:
+            seconds = float(raw)
+        except ValueError:
+            try:
+                when = email.utils.parsedate_to_datetime(raw)
+            except (TypeError, ValueError):
+                return None
+            if when is None:
+                return None
+            now = dt.datetime.now(dt.timezone.utc)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=dt.timezone.utc)
+            seconds = (when - now).total_seconds()
+        if seconds != seconds or seconds < 0:  # NaN or a date already past
+            return 0.0
+        return min(seconds, self.max_retry_after)
+
     def _post(self, req) -> dict:
-        """POST the request, retrying transient transport failures.
+        """POST the request, retrying transient transport failures and throttling.
 
         urlopen raises TimeoutError when a server accepts the connection and
         then goes quiet, which is not an HTTPError and so used to escape step()
@@ -86,11 +125,22 @@ class OpenAICompatibleBackend:
         one. A local Ollama stalling for two minutes is a blip to retry, not a
         reason to throw away an hour of episodes.
 
+        A 429 or a 5xx is the hosted-endpoint version of the same thing. Both
+        arrive as HTTPError, which was raised immediately, so a single throttle
+        response part-way through a 20-episode run ended the run and lost every
+        episode after the last completed one. They are retried with exponential
+        backoff, honouring Retry-After when the server sends it, on a budget of
+        their own: throttling is routine on a hosted endpoint and must not
+        consume the retries meant for a genuinely sick connection.
+
         ContextLengthExceeded is deliberately NOT retried: it is a real episode
         outcome the runner records as `context_exhausted`, and retrying it would
-        turn a finding into a hang.
+        turn a finding into a hang. A 4xx that is not 429 is not retried either
+        — the request is wrong, and sending it again just wastes quota.
         """
-        for attempt in range(self.max_retries + 1):
+        transport_attempts = 0
+        throttle_attempts = 0
+        while True:
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     return json.loads(resp.read().decode("utf-8"))
@@ -100,30 +150,49 @@ class OpenAICompatibleBackend:
                     # Its own exception, not a generic RuntimeError: the runner
                     # ends the episode as "context_exhausted" rather than
                     # crashing the whole run, and the outcome stays separable in
-                    # the analysis.
+                    # the analysis. Checked before the status test so a provider
+                    # that reports an overflow as a 429 or 500 is still recorded
+                    # as an episode outcome rather than retried into a hang.
                     raise ContextLengthExceeded(
                         f"HTTP {e.code} from {self.base_url}: {detail}"
                     ) from e
-                raise RuntimeError(
-                    f"HTTP {e.code} from {self.base_url}: {detail}"
-                ) from e
-            except self._TRANSIENT as e:
-                if attempt == self.max_retries:
+                if e.code != 429 and not (500 <= e.code < 600):
                     raise RuntimeError(
-                        f"{self.base_url}: giving up after {self.max_retries} "
-                        f"retries: {type(e).__name__}: {e}"
+                        f"HTTP {e.code} from {self.base_url}: {detail}"
                     ) from e
-                delay = self.retry_backoff * 2**attempt
-                # stderr, not the trajectory: a retried blip is an operational
-                # event, not something the agent did.
+                if throttle_attempts >= self.max_rate_limit_retries:
+                    raise RuntimeError(
+                        f"HTTP {e.code} from {self.base_url}: giving up after "
+                        f"{self.max_rate_limit_retries} retries: {detail}"
+                    ) from e
+                delay = self._retry_after_seconds(getattr(e, "headers", None))
+                if delay is None:
+                    delay = self.retry_backoff * 2**throttle_attempts
+                throttle_attempts += 1
                 print(
-                    f"  [backend] {type(e).__name__}: {e} - retry "
-                    f"{attempt + 1}/{self.max_retries} in {delay:.0f}s",
+                    f"  [backend] HTTP {e.code} - retry {throttle_attempts}/"
+                    f"{self.max_rate_limit_retries} in {delay:.0f}s",
                     file=sys.stderr,
                     flush=True,
                 )
                 time.sleep(delay)
-        raise AssertionError("unreachable")  # pragma: no cover
+            except self._TRANSIENT as e:
+                if transport_attempts >= self.max_retries:
+                    raise RuntimeError(
+                        f"{self.base_url}: giving up after {self.max_retries} "
+                        f"retries: {type(e).__name__}: {e}"
+                    ) from e
+                delay = self.retry_backoff * 2**transport_attempts
+                transport_attempts += 1
+                # stderr, not the trajectory: a retried blip is an operational
+                # event, not something the agent did.
+                print(
+                    f"  [backend] {type(e).__name__}: {e} - retry "
+                    f"{transport_attempts}/{self.max_retries} in {delay:.0f}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(delay)
 
     def step(self, messages: list[dict], tools: list[dict]) -> LLMResponse:
         payload = {

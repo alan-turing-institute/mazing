@@ -5,6 +5,8 @@ and malformed tool-argument JSON from an OpenAI-compatible server.
 
 from __future__ import annotations
 
+import datetime
+import email.utils
 import io
 import json
 import urllib.error
@@ -676,3 +678,283 @@ def test_eval_holds_out_stalled_episodes():
     r = agg["report"][key]
     assert r["n_no_progress"] == 1
     assert r["n"] == 0  # held out of every behavioural rate
+
+
+def test_run_py_arms_the_no_progress_rail(tmp_path, monkeypatch):
+    """run.py must PASS --max-idle-steps to run_episode, not just record it.
+
+    Regression: it wrote max_idle_steps into run_config while never handing it
+    to run_episode, so the rail read as configured and was inert. Tests that
+    call run_episode directly cannot see this — only the wiring can.
+    """
+    seen = {}
+    real = run_module.run_episode
+
+    def spy(maze, backend, **kwargs):
+        seen.update(kwargs)
+        return real(maze, backend, **kwargs)
+
+    monkeypatch.setattr(run_module, "run_episode", spy)
+    run_module.main([
+        "--backend", "dummy", "--n-mazes", "1", "--max-steps", "5",
+        "--max-idle-steps", "7", "--out-dir", str(tmp_path),
+    ])
+    assert seen["max_idle_steps"] == 7
+
+
+def test_run_py_persists_the_stall_diagnostics(tmp_path, monkeypatch):
+    """The stall report is useless if assemble_record drops it on the way out."""
+    monkeypatch.setattr(run_module, "make_backend", lambda args: _LoopingBackend())
+    run_module.main([
+        "--backend", "dummy", "--n-mazes", "1", "--rows", "5", "--cols", "5",
+        "--max-steps", "500", "--max-idle-steps", "10", "--out-dir", str(tmp_path),
+    ])
+    (record,) = [
+        json.loads(p.read_text())
+        for p in tmp_path.glob("*/*/episode_*.json")
+    ]
+    result = record["episode_result"]
+    assert result["end_reason"] == "no_progress"
+    assert result["longest_idle_run"] >= 10
+    assert result["stall"]["cycle"]["cycle_length"] == 2
+
+
+@pytest.mark.parametrize("distance", [1, 2, 4, 8])
+def test_start_distance_places_the_start_exactly(distance):
+    maze = make_maze(0, rows=9, cols=9, label=MazeLabel.SOLVABLE,
+                     start_distance=distance)
+    assert maze.shortest_path_length == distance
+
+
+def test_start_distance_leaves_the_maze_itself_untouched():
+    """Only the start may move: a different maze would confound the comparison
+    the manipulation exists to make."""
+    base = make_maze(3, rows=9, cols=9, label=MazeLabel.SOLVABLE)
+    moved = make_maze(3, rows=9, cols=9, label=MazeLabel.SOLVABLE,
+                      start_distance=2)
+    assert moved.passages == base.passages
+    assert moved.goal == base.goal
+    assert moved.start != base.start
+
+
+def test_start_distance_keeps_the_bands_paired():
+    """Both bands must get the SAME start, or the within-seed contrast breaks."""
+    for seed in range(5):
+        solvable = make_maze(seed, rows=9, cols=9, label=MazeLabel.SOLVABLE,
+                             start_distance=2)
+        sealed = make_maze(seed, rows=9, cols=9, label=MazeLabel.UNSOLVABLE,
+                           start_distance=2)
+        assert solvable.start == sealed.start
+        # The invariant the whole design rests on still holds.
+        assert sealed.reachable_component_size == 9 * 9 - 1
+
+
+def test_start_distance_defaults_to_the_corner():
+    assert make_maze(0, rows=9, cols=9, label=MazeLabel.SOLVABLE).start == (0, 0)
+
+
+def test_eval_never_pools_different_start_distances():
+    """A near start is a different question, not more data for the same one."""
+    import eval as eval_module
+
+    records = []
+    for distance in (None, 2):
+        maze = make_maze(0, rows=9, cols=9, label=MazeLabel.SOLVABLE,
+                         start_distance=distance)
+        episode = run_episode(maze, DummyExplorerBackend(), max_steps=20)
+        records.append({
+            "complete": True,
+            "config": {"policy_hash": "p", "model": "m", "policy": "x",
+                       "rows": 9, "cols": 9, "start_distance": distance},
+            "maze": {"label": "solvable"},
+            "metrics": compute_metrics(episode, maze),
+        })
+    agg = eval_module.aggregate(records)
+    assert len(agg["report"]) == 2
+
+
+def _http_error(code: int, payload: bytes = b'{"error": {"message": "slow down"}}',
+                headers: dict | None = None):
+    return urllib.error.HTTPError(
+        "http://x/v1", code, "Too Many Requests", headers or {}, io.BytesIO(payload)
+    )
+
+
+def test_openai_backend_retries_rate_limits(monkeypatch):
+    """A 429 must not end the run.
+
+    HTTPError was raised immediately, so one throttle response part-way through
+    a 20-episode hosted run killed the process and lost every episode after the
+    last completed one — the same failure the timeout retry was added for.
+    """
+    from backends import openai_compat
+
+    body = {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+    calls = []
+
+    def throttled(req, timeout=None):
+        calls.append(1)
+        if len(calls) < 3:
+            raise _http_error(429)
+        return _fake_response(body)
+
+    monkeypatch.setattr(openai_compat.urllib.request, "urlopen", throttled)
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda s: None)
+    backend = openai_compat.OpenAICompatibleBackend(model="m", base_url="http://x/v1")
+    assert backend.step([], []).text == "ok"
+    assert len(calls) == 3
+
+
+def test_openai_backend_retries_server_errors(monkeypatch):
+    """A 5xx is the server having a moment, not a malformed request."""
+    from backends import openai_compat
+
+    body = {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+    calls = []
+
+    def flaky(req, timeout=None):
+        calls.append(1)
+        if len(calls) < 3:
+            raise _http_error(503, b'{"error": {"message": "upstream unavailable"}}')
+        return _fake_response(body)
+
+    monkeypatch.setattr(openai_compat.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda s: None)
+    backend = openai_compat.OpenAICompatibleBackend(model="m", base_url="http://x/v1")
+    assert backend.step([], []).text == "ok"
+    assert len(calls) == 3
+
+
+def test_openai_backend_honours_retry_after(monkeypatch):
+    """The server knows its own throttle better than any backoff curve."""
+    from backends import openai_compat
+
+    body = {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+    calls, slept = [], []
+
+    def throttled(req, timeout=None):
+        calls.append(1)
+        if len(calls) < 2:
+            raise _http_error(429, headers={"Retry-After": "37"})
+        return _fake_response(body)
+
+    monkeypatch.setattr(openai_compat.urllib.request, "urlopen", throttled)
+    monkeypatch.setattr(openai_compat.time, "sleep", slept.append)
+    backend = openai_compat.OpenAICompatibleBackend(
+        model="m", base_url="http://x/v1", retry_backoff=2.0
+    )
+    assert backend.step([], []).text == "ok"
+    assert slept == [37.0]  # the header, not the 2s backoff curve
+
+
+def test_openai_backend_caps_retry_after(monkeypatch):
+    """An endpoint parked behind a multi-hour quota reset should fail the run,
+    not leave a process that merely looks alive."""
+    from backends import openai_compat
+
+    slept = []
+
+    def throttled(req, timeout=None):
+        raise _http_error(429, headers={"Retry-After": "86400"})
+
+    monkeypatch.setattr(openai_compat.urllib.request, "urlopen", throttled)
+    monkeypatch.setattr(openai_compat.time, "sleep", slept.append)
+    backend = openai_compat.OpenAICompatibleBackend(
+        model="m", base_url="http://x/v1", max_rate_limit_retries=2,
+        max_retry_after=300.0,
+    )
+    with pytest.raises(RuntimeError, match="giving up after 2 retries"):
+        backend.step([], [])
+    assert slept == [300.0, 300.0]
+
+
+def test_openai_backend_accepts_http_date_retry_after(monkeypatch):
+    """RFC 9110 allows a date as well as a delay, and hosted endpoints send both."""
+    from backends import openai_compat
+
+    body = {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+    calls, slept = [], []
+    when = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=45)
+
+    def throttled(req, timeout=None):
+        calls.append(1)
+        if len(calls) < 2:
+            raise _http_error(
+                429, headers={"Retry-After": email.utils.format_datetime(when)}
+            )
+        return _fake_response(body)
+
+    monkeypatch.setattr(openai_compat.urllib.request, "urlopen", throttled)
+    monkeypatch.setattr(openai_compat.time, "sleep", slept.append)
+    backend = openai_compat.OpenAICompatibleBackend(model="m", base_url="http://x/v1")
+    assert backend.step([], []).text == "ok"
+    assert 40 <= slept[0] <= 46
+
+
+def test_openai_backend_does_not_retry_client_errors(monkeypatch):
+    """A 400 or a 401 means the request is wrong; resending it wastes quota and
+    hides the real error behind a minute of backoff."""
+    from backends import openai_compat
+
+    for code in (400, 401, 404):
+        calls = []
+
+        def broken(req, timeout=None, _calls=calls):
+            _calls.append(1)
+            raise _http_error(code, b'{"error": {"message": "bad request"}}')
+
+        monkeypatch.setattr(openai_compat.urllib.request, "urlopen", broken)
+        monkeypatch.setattr(openai_compat.time, "sleep", lambda s: None)
+        backend = openai_compat.OpenAICompatibleBackend(
+            model="m", base_url="http://x/v1"
+        )
+        with pytest.raises(RuntimeError, match=f"HTTP {code}"):
+            backend.step([], [])
+        assert len(calls) == 1
+
+
+def test_rate_limit_retry_does_not_swallow_context_overflow(monkeypatch):
+    """A provider that reports an overflow as a 429 must still end the episode
+    as context_exhausted — retrying it would turn a finding into a hang."""
+    from backends import openai_compat
+
+    calls = []
+
+    def overflow(req, timeout=None):
+        calls.append(1)
+        raise _http_error(
+            429, b'{"error": {"message": "maximum context length is 4096"}}'
+        )
+
+    monkeypatch.setattr(openai_compat.urllib.request, "urlopen", overflow)
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda s: None)
+    backend = openai_compat.OpenAICompatibleBackend(model="m", base_url="http://x/v1")
+    with pytest.raises(ContextLengthExceeded):
+        backend.step([], [])
+    assert len(calls) == 1
+
+
+def test_throttling_does_not_consume_the_transport_retry_budget(monkeypatch):
+    """Throttling is routine on a hosted endpoint; a sick socket is not. They
+    get separate budgets so a run full of 429s still has retries left for a
+    genuine connection failure."""
+    from backends import openai_compat
+
+    body = {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+    calls = []
+
+    def mixed(req, timeout=None):
+        calls.append(1)
+        if len(calls) <= 5:
+            raise _http_error(429)
+        if len(calls) <= 8:
+            raise TimeoutError("timed out")
+        return _fake_response(body)
+
+    monkeypatch.setattr(openai_compat.urllib.request, "urlopen", mixed)
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda s: None)
+    backend = openai_compat.OpenAICompatibleBackend(
+        model="m", base_url="http://x/v1", max_retries=3, max_rate_limit_retries=8
+    )
+    assert backend.step([], []).text == "ok"
+    assert len(calls) == 9
