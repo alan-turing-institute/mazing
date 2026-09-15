@@ -10,6 +10,9 @@ dependencies = []
 [project.optional-dependencies]
 # Optional: only needed for gif.py / `run.py --gif`. Core stays dependency-free.
 viz = ["pillow>=10.1"]
+# Optional: only needed for `run.py --backend anthropic` (Claude on
+# Microsoft Foundry or first-party). Core stays dependency-free.
+anthropic = ["anthropic>=1.0"]
 
 [dependency-groups]
 dev = ["pytest>=8"]

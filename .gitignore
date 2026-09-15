@@ -12,6 +12,9 @@ wheels/
 # Run outputs
 runs/
 
+# Secrets — the Azure endpoint key lives here, never in a run config or a commit
+.env
+
 # Local tooling / internal notes (not for the public repo)
 .claude/
 planning/
