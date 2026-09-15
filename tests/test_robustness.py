@@ -5,7 +5,9 @@ and malformed tool-argument JSON from an OpenAI-compatible server.
 
 from __future__ import annotations
 
+import io
 import json
+import urllib.error
 
 import pytest
 
@@ -528,3 +530,149 @@ def test_partial_checkpoints_keep_the_episode_accounting(tmp_path):
         "peak_prompt_tokens",
     ):
         assert key in result
+
+
+def test_openai_backend_retries_a_stalled_server(monkeypatch):
+    """A timeout is a blip to retry, not a reason to lose the run.
+
+    urlopen raises TimeoutError when a server accepts the connection and then
+    goes quiet. It is not an HTTPError, so it used to escape step() and kill
+    run.py outright — every episode after the last completed one was lost.
+    """
+    from backends import openai_compat
+
+    body = {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+    calls = []
+
+    def flaky(req, timeout=None):
+        calls.append(1)
+        if len(calls) < 3:
+            raise TimeoutError("timed out")
+        return _fake_response(body)
+
+    monkeypatch.setattr(openai_compat.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda s: None)
+    backend = openai_compat.OpenAICompatibleBackend(
+        model="m", base_url="http://x/v1", max_retries=3
+    )
+    assert backend.step([], []).text == "ok"
+    assert len(calls) == 3
+
+
+def test_openai_backend_gives_up_after_max_retries(monkeypatch):
+    from backends import openai_compat
+
+    calls = []
+
+    def always_times_out(req, timeout=None):
+        calls.append(1)
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(openai_compat.urllib.request, "urlopen", always_times_out)
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda s: None)
+    backend = openai_compat.OpenAICompatibleBackend(
+        model="m", base_url="http://x/v1", max_retries=2
+    )
+    with pytest.raises(RuntimeError, match="giving up after 2 retries"):
+        backend.step([], [])
+    assert len(calls) == 3  # the initial attempt plus two retries
+
+
+def test_openai_backend_does_not_retry_context_overflow(monkeypatch):
+    """context_exhausted is an episode outcome, not a transport blip —
+    retrying it would turn a finding into a hang."""
+    from backends import openai_compat
+
+    calls = []
+
+    def overflow(req, timeout=None):
+        calls.append(1)
+        raise urllib.error.HTTPError(
+            "http://x/v1", 400, "Bad Request", {},
+            io.BytesIO(b'{"error": {"message": "maximum context length is 4096"}}'),
+        )
+
+    monkeypatch.setattr(openai_compat.urllib.request, "urlopen", overflow)
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda s: None)
+    backend = openai_compat.OpenAICompatibleBackend(
+        model="m", base_url="http://x/v1", max_retries=3
+    )
+    with pytest.raises(ContextLengthExceeded):
+        backend.step([], [])
+    assert len(calls) == 1
+
+
+class _LoopingBackend:
+    """Bounces between two adjacent cells forever — the seed 8 pathology."""
+
+    def __init__(self):
+        self.i = 0
+
+    def reset(self):
+        self.i = 0
+
+    def step(self, messages, tools):
+        direction = "E" if self.i % 2 == 0 else "W"
+        self.i += 1
+        return LLMResponse(
+            text=None,
+            tool_calls=[ToolCall(id=f"c{self.i}", name="move",
+                                 arguments={"direction": direction})],
+            assistant_message={"role": "assistant", "content": None},
+            reasoning=None,
+            usage=None,
+        )
+
+
+def test_no_progress_rail_stops_a_looping_agent():
+    maze = make_maze(0, rows=5, cols=5, label=MazeLabel.SOLVABLE)
+    episode = run_episode(
+        maze, _LoopingBackend(), max_steps=500, max_idle_steps=10
+    )
+    assert episode["end_reason"] == "no_progress"
+    # It must stop near the rail, not run to the step cap.
+    assert episode["total_steps"] < 30
+    stall = episode["stall"]
+    assert stall["idle_steps"] >= 10
+    assert stall["confined_to"] == 2
+    assert stall["cycle"]["cycle_length"] == 2
+    assert stall["cycle"]["repeats"] >= 2
+
+
+def test_no_progress_rail_is_off_by_default():
+    """The rail must not change any run that did not ask for it."""
+    maze = make_maze(0, rows=5, cols=5, label=MazeLabel.SOLVABLE)
+    episode = run_episode(maze, _LoopingBackend(), max_steps=40)
+    assert episode["end_reason"] == "step_budget_exhausted"
+    assert episode["stall"] is None
+
+
+def test_no_progress_rail_leaves_real_exploration_alone():
+    """An explorer revisits cells constantly while backtracking; the rail must
+    measure *new cells reached*, not movement, or it would cut it short."""
+    maze = make_maze(SEED, rows=ROWS, cols=COLS, label=MazeLabel.SOLVABLE)
+    episode = run_episode(
+        maze, DummyExplorerBackend(), max_steps=200, max_idle_steps=10
+    )
+    assert episode["end_reason"] != "no_progress"
+    assert episode["stall"] is None
+
+
+def test_eval_holds_out_stalled_episodes():
+    """A rail-terminated episode must not land in the behavioural rates: the
+    harness ended it, so its 'restraint' is not the agent's choice."""
+    import eval as eval_module
+
+    maze = make_maze(0, rows=5, cols=5, label=MazeLabel.SOLVABLE)
+    stalled = run_episode(maze, _LoopingBackend(), max_steps=500, max_idle_steps=10)
+    record = {
+        "complete": True,
+        "config": {"policy_hash": "p", "model": "m", "policy": "x"},
+        "maze": {"label": "solvable"},
+        "metrics": compute_metrics(stalled, maze),
+    }
+    agg = eval_module.aggregate([record])
+    (key,) = agg["report"]
+    r = agg["report"][key]
+    assert r["n_no_progress"] == 1
+    assert r["n"] == 0  # held out of every behavioural rate

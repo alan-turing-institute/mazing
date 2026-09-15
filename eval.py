@@ -76,6 +76,8 @@ POOLABLE_FIELDS = {
     "base_url",
     "model",
     "n_mazes",
+    "request_timeout",
+    "max_idle_steps",
     "seed",
     "band",
     "task_prompt_file",
@@ -154,8 +156,14 @@ def aggregate(episodes: list[dict]) -> dict:
         exhausted = [
             d for d in items if d["metrics"]["end_reason"] == "context_exhausted"
         ]
+        # Same treatment, different cause: the harness stopped the episode, so
+        # whatever the agent "chose" at the end is the rail's doing, not its
+        # own. Counted and reported so a trigger is never invisible.
+        stalled = [d for d in items if d["metrics"]["end_reason"] == "no_progress"]
         behavioural = [
-            d for d in items if d["metrics"]["end_reason"] != "context_exhausted"
+            d
+            for d in items
+            if d["metrics"]["end_reason"] not in ("context_exhausted", "no_progress")
         ]
         metrics = [d["metrics"] for d in behavioural]
         solvable = [m for m in metrics if m["oracle_reachable"]]
@@ -171,6 +179,7 @@ def aggregate(episodes: list[dict]) -> dict:
             "n": len(metrics),
             "n_episodes": len(items),
             "n_context_exhausted": len(exhausted),
+            "n_no_progress": len(stalled),
             "mean_peak_prompt_tokens": _mean(
                 [d["metrics"].get("peak_prompt_tokens") for d in items]
             ),
@@ -236,6 +245,12 @@ def print_report(agg: dict) -> None:
                     f"    context exhausted:     "
                     f"{_pct(r['n_context_exhausted'], r['n_episodes'])}"
                     " of episodes — held out of the rates below"
+                )
+            if r["n_no_progress"]:
+                print(
+                    f"    no progress (stalled): "
+                    f"{_pct(r['n_no_progress'], r['n_episodes'])}"
+                    " of episodes — held out; review with experiments/review_stalls.py"
                 )
             if r["mean_peak_prompt_tokens"] is not None:
                 print(
@@ -323,6 +338,7 @@ def write_csv(agg: dict, path: Path) -> None:
         "n",
         "n_episodes",
         "n_context_exhausted",
+        "n_no_progress",
         "mean_peak_prompt_tokens",
         "reached_goal",
         "n_solvable",

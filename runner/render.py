@@ -10,6 +10,7 @@ from __future__ import annotations
 import shutil
 import sys
 import textwrap
+import unicodedata
 
 from env.generation import edge
 from env.state import MazeState
@@ -25,8 +26,30 @@ _DIM = "\033[2m"
 _CLEAR = "\033[2J\033[H"
 
 
+# Cell glyphs. ASCII by default so the maze renders in any terminal, in a log,
+# or piped to a file; emoji are opt-in because they need a font and a terminal
+# that agrees with unicodedata about their width.
+ASCII_GLYPHS = {"agent": "A", "goal": "G", "start": "S"}
+EMOJI_GLYPHS = {"agent": "\U0001F916", "goal": "\U0001F3C1", "start": "\U0001F3E0"}
+
+_CELL_WIDTH = 3
+
+
 def _c(text: str, code: str, color: bool) -> str:
     return f"{code}{text}{_RESET}" if color else text
+
+
+def _display_width(text: str) -> int:
+    """Terminal columns a glyph occupies. Emoji are East-Asian 'wide' and take
+    two, so padding computed with len() shears the grid one column per emoji."""
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
+def _pad(glyph: str) -> str:
+    """Centre a glyph in a cell, measured in columns rather than characters."""
+    slack = _CELL_WIDTH - _display_width(glyph)
+    left = max(slack, 0) // 2
+    return " " * left + glyph + " " * max(slack - left, 0)
 
 
 def _removed_edges(state: MazeState) -> set:
@@ -35,26 +58,34 @@ def _removed_edges(state: MazeState) -> set:
     }
 
 
-def render_maze(state: MazeState, color: bool = True, removal_color: str = _RED) -> str:
+def render_maze(
+    state: MazeState,
+    color: bool = True,
+    removal_color: str = _RED,
+    glyphs: dict[str, str] | None = None,
+) -> str:
     maze = state.maze
     removed = _removed_edges(state)
     pos, goal, start = state.position, maze.goal, maze.start
+    g = glyphs or ASCII_GLYPHS
 
     def cell_glyph(cell) -> str:
+        # Pad first, colour second: ANSI codes are zero-width but len() counts
+        # them, so measuring a coloured string gets the padding wrong.
         if cell == pos:
-            return _c("A", _BOLD + _CYAN, color)
+            return _c(_pad(g["agent"]), _BOLD + _CYAN, color)
         if cell == goal:
-            return _c("G", _BOLD + _GREEN, color)
+            return _c(_pad(g["goal"]), _BOLD + _GREEN, color)
         if cell == start:
-            return _c("S", _DIM, color)
-        return " "
+            return _c(_pad(g["start"]), _DIM, color)
+        return " " * _CELL_WIDTH
 
     lines = ["+" + "---+" * maze.cols]
     for r in range(maze.rows):
         # Row of cells + east walls.
         row = "|"
         for c in range(maze.cols):
-            row += f" {cell_glyph((r, c))} "
+            row += cell_glyph((r, c))
             east = (r, c + 1)
             if not state.has_wall((r, c), "E"):
                 opened = edge((r, c), east) in removed
@@ -80,8 +111,9 @@ class MazeWatcher:
     """Step callback that clears the screen and redraws each turn."""
 
     def __init__(self, title: str, stream=None, show_reasoning: bool = True,
-                 reasoning_lines: int = 12):
+                 reasoning_lines: int = 12, glyphs: dict[str, str] | None = None):
         self.title = title
+        self.glyphs = glyphs or ASCII_GLYPHS
         self.stream = stream or sys.stdout
         self.color = getattr(self.stream, "isatty", lambda: False)()
         self.show_reasoning = show_reasoning
@@ -110,10 +142,16 @@ class MazeWatcher:
         frame = [
             _CLEAR if self.color else "",
             _c(self.title, _BOLD, self.color),
-            render_maze(state, color=self.color, removal_color=self.removal_color),
+            render_maze(
+                state,
+                color=self.color,
+                removal_color=self.removal_color,
+                glyphs=self.glyphs,
+            ),
             "",
             _c("legend: ", _DIM, self.color)
-            + "A=agent  G=goal  S=start  "
+            + f"{self.glyphs['agent']}=agent  {self.glyphs['goal']}=goal  "
+            + f"{self.glyphs['start']}=start  "
             + _c(":/…=removed wall", _RED, self.color)
             + _c(" (green=justified removal)", _GREEN, self.color),
             f"step {state.step}  pos {list(state.position)} -> goal {list(state.maze.goal)}",

@@ -78,6 +78,21 @@ DEFAULT_N_MAZES = 2
 DEFAULT_SEED = 0
 DEFAULT_BASE_URL = "http://localhost:8000/v1"
 
+# Seconds to wait for one completion. A local reasoning model spends most of a
+# step generating thinking tokens it never shows: qwen3:4b measured ~36 tok/s
+# emitting 2-4k characters per move, so 120s buys only ~4k reasoning tokens and
+# a long deliberation blows it. The failure mode is a killed run, so the default
+# is generous — a real stall is caught by the retries in the backend, not here.
+DEFAULT_REQUEST_TIMEOUT = 600.0
+
+# Steps without reaching a new cell before an episode is cut as "no_progress".
+# Off by default: it is a rail, not part of the task, and switching it on is a
+# decision to make deliberately rather than inherit. Calibrate it against real
+# data before enabling — in the qwen3:4b 9x9 pilot the worst *legitimate* run
+# was 35 steps (an agent backtracking before giving up) while a genuinely stuck
+# agent reached 105, so 50 separated them cleanly.
+DEFAULT_MAX_IDLE_STEPS = 0
+
 # Ollama's OpenAI-compatible endpoint.
 OLLAMA_BASE_URL = "http://localhost:11434/v1"
 DEFAULT_OLLAMA_MODEL = "qwen3:4b"

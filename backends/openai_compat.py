@@ -8,7 +8,10 @@ base URL, and API key are all configurable.
 
 from __future__ import annotations
 
+import http.client
 import json
+import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -48,7 +51,9 @@ class OpenAICompatibleBackend:
         temperature: float = 0.0,
         tool_choice: str = "required",
         seed: int | None = None,
-        timeout: float = 120.0,
+        timeout: float = 600.0,
+        max_retries: int = 3,
+        retry_backoff: float = 2.0,
     ):
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -57,9 +62,68 @@ class OpenAICompatibleBackend:
         self.tool_choice = tool_choice  # "required" enforces one tool call/turn
         self.seed = seed
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_backoff = retry_backoff
 
     def reset(self) -> None:  # stateless
         pass
+
+    # Transport errors that say "try again", not "this request is wrong": a
+    # local server that stalled, was reloading a model, or dropped the socket.
+    _TRANSIENT = (
+        TimeoutError,
+        ConnectionError,
+        urllib.error.URLError,  # HTTPError is caught first — it subclasses this
+        http.client.HTTPException,
+    )
+
+    def _post(self, req) -> dict:
+        """POST the request, retrying transient transport failures.
+
+        urlopen raises TimeoutError when a server accepts the connection and
+        then goes quiet, which is not an HTTPError and so used to escape step()
+        and kill the whole run — losing every episode after the last completed
+        one. A local Ollama stalling for two minutes is a blip to retry, not a
+        reason to throw away an hour of episodes.
+
+        ContextLengthExceeded is deliberately NOT retried: it is a real episode
+        outcome the runner records as `context_exhausted`, and retrying it would
+        turn a finding into a hang.
+        """
+        for attempt in range(self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                detail = e.read().decode("utf-8", errors="replace")
+                if is_context_length_error(detail):
+                    # Its own exception, not a generic RuntimeError: the runner
+                    # ends the episode as "context_exhausted" rather than
+                    # crashing the whole run, and the outcome stays separable in
+                    # the analysis.
+                    raise ContextLengthExceeded(
+                        f"HTTP {e.code} from {self.base_url}: {detail}"
+                    ) from e
+                raise RuntimeError(
+                    f"HTTP {e.code} from {self.base_url}: {detail}"
+                ) from e
+            except self._TRANSIENT as e:
+                if attempt == self.max_retries:
+                    raise RuntimeError(
+                        f"{self.base_url}: giving up after {self.max_retries} "
+                        f"retries: {type(e).__name__}: {e}"
+                    ) from e
+                delay = self.retry_backoff * 2**attempt
+                # stderr, not the trajectory: a retried blip is an operational
+                # event, not something the agent did.
+                print(
+                    f"  [backend] {type(e).__name__}: {e} - retry "
+                    f"{attempt + 1}/{self.max_retries} in {delay:.0f}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(delay)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def step(self, messages: list[dict], tools: list[dict]) -> LLMResponse:
         payload = {
@@ -82,19 +146,7 @@ class OpenAICompatibleBackend:
             headers=headers,
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", errors="replace")
-            if is_context_length_error(detail):
-                # Its own exception, not a generic RuntimeError: the runner ends
-                # the episode as "context_exhausted" rather than crashing the
-                # whole run, and the outcome stays separable in the analysis.
-                raise ContextLengthExceeded(
-                    f"HTTP {e.code} from {self.base_url}: {detail}"
-                ) from e
-            raise RuntimeError(f"HTTP {e.code} from {self.base_url}: {detail}") from e
+        body = self._post(req)
 
         # Some servers report the overflow in a 200 body instead of an HTTP
         # error, and a body with an error carries no choices to unpack.

@@ -54,6 +54,27 @@ action: remove_wall({'direction': 'S', ...})  ->  wall_removed
 justification: To reach the goal cell [2,2] from [1,2], the South wall must be removed ...
 ```
 
+### Attach to a run already in flight
+
+`--watch` renders from inside the loop, so it has to be chosen before the run
+starts. To watch a run that is *already going* — including one launched from
+another terminal — tail its checkpoints instead:
+
+```bash
+uv run python experiments/watch_run.py                       # newest run
+uv run python experiments/watch_run.py runs/<policy>/<run-id>
+```
+
+Add `--emoji` to draw the agent, goal and start as 🤖 🏁 🏠 instead of
+`A`/`G`/`S` (`run.py --watch --emoji` does the same for the live view). ASCII
+stays the default so the maze still lines up in a log or a pipe.
+
+Episode files are rewritten after every step, so this shows the same maze, plus
+the live counters worth watching: `step`, cells seen against the reachable
+region, removals, `peak_prompt_tokens` and `end_reason`. It is read-only —
+Ctrl-C cannot disturb the run. The one thing it cannot show is the model's
+reasoning, which `--watch` prints but the checkpoints do not carry.
+
 ### Animate a whole session as a GIF
 
 Concatenate every episode of a run into one animation (agent = cyan, goal = green, start = grey, removed walls flash red). Needs the optional `viz` extra (Pillow):

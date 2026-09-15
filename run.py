@@ -32,7 +32,7 @@ from backends import (
 from env.generation import MazeLabel, make_maze
 from metrics import compute_metrics, summary_row
 from runner import run_episode
-from runner.render import MazeWatcher
+from runner.render import EMOJI_GLYPHS, MazeWatcher
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -104,6 +104,7 @@ def make_backend(args):
             api_key=args.api_key or "ollama",
             seed=args.seed,
             tool_choice="auto",
+            timeout=args.request_timeout,
         )
     if args.backend == "openai":
         if not args.model:
@@ -115,6 +116,7 @@ def make_backend(args):
             base_url=base_url,
             api_key=api_key,
             seed=args.seed,
+            timeout=args.request_timeout,
         )
     sys.exit(f"unknown backend: {args.backend}")
 
@@ -182,6 +184,14 @@ def main(argv=None):
         f"(ollama: {config.OLLAMA_BASE_URL}).",
     )
     p.add_argument("--api-key", default=None, help="Overrides $OPENAI_API_KEY.")
+    p.add_argument(
+        "--request-timeout",
+        type=float,
+        default=config.DEFAULT_REQUEST_TIMEOUT,
+        help="Seconds to wait for one completion before retrying it. Raise it "
+        "for a slow local reasoning model; the tell that it is too low is a run "
+        "dying on TimeoutError mid-episode.",
+    )
     p.add_argument("--n-mazes", type=int, default=config.DEFAULT_N_MAZES)
     p.add_argument("--seed", type=int, default=config.DEFAULT_SEED)
     p.add_argument(
@@ -209,6 +219,15 @@ def main(argv=None):
         "budget paragraph from the task prompt. --max-steps still caps the "
         "episode (ending it as 'hard_cap_reached'), so nothing runs forever. "
         "Use it to measure restraint without time pressure as a confound.",
+    )
+    p.add_argument(
+        "--max-idle-steps",
+        type=int,
+        default=config.DEFAULT_MAX_IDLE_STEPS,
+        help="End an episode after this many steps without the agent reaching "
+        "a cell it has never visited, as 'no_progress'. A safety rail for "
+        "agents that circle a few cells forever; a trigger flags an episode "
+        "for review rather than deciding anything. Omit (or 0) to disable.",
     )
     p.add_argument("--rows", type=int, default=config.DEFAULT_ROWS)
     p.add_argument("--cols", type=int, default=config.DEFAULT_COLS)
@@ -238,6 +257,11 @@ def main(argv=None):
         "--no-reasoning",
         action="store_true",
         help="With --watch, do NOT print the model's reasoning under the maze.",
+    )
+    p.add_argument(
+        "--emoji",
+        action="store_true",
+        help="With --watch, draw the agent, goal and start as emoji.",
     )
     p.add_argument(
         "--reasoning-lines",
@@ -301,6 +325,8 @@ def main(argv=None):
         "seed": args.seed,
         "band": args.band,
         "max_steps": args.max_steps,
+        "request_timeout": args.request_timeout,
+        "max_idle_steps": args.max_idle_steps,
         "step_budget_shown": include_budget,
         "rows": args.rows,
         "cols": args.cols,
@@ -355,6 +381,7 @@ def main(argv=None):
                 title,
                 show_reasoning=not args.no_reasoning,
                 reasoning_lines=args.reasoning_lines,
+                glyphs=EMOJI_GLYPHS if args.emoji else None,
             )
 
         def checkpoint(partial, i=i, maze=maze, path=episode_path):

@@ -31,12 +31,60 @@ def _result_content(result: str, observation: dict) -> str:
     return json.dumps({"result": result, "observation": observation}, indent=2)
 
 
+
+def _detect_cycle(path: list[tuple[int, int]], max_len: int = 12) -> dict | None:
+    """The shortest repeating movement cycle at the end of `path`, if any.
+
+    Purely diagnostic. It is deliberately not what ends an episode: a tidy
+    periodic cycle is easy to spot, but an agent milling around the same eight
+    cells in a different order every time is just as stuck and has no period at
+    all. The idle counter catches both; this only describes the tidy case,
+    because "an 8-cell cycle walked 15 times" says far more in a writeup than
+    "no new cell for 50 steps".
+    """
+    for length in range(1, max_len + 1):
+        if len(path) < length * 2:
+            break
+        window = path[-length:]
+        repeats = 1
+        i = len(path) - length
+        while i - length >= 0 and path[i - length : i] == window:
+            repeats += 1
+            i -= length
+        if repeats >= 2:
+            return {
+                "cycle_length": length,
+                "repeats": repeats,
+                "cells": [list(c) for c in sorted(set(window))],
+            }
+    return None
+
+
+def _stall_report(path: list[tuple[int, int]], idle_steps: int, state) -> dict:
+    """Evidence for reviewing a no_progress trigger.
+
+    A trigger is a flag, not a verdict — `confined_to` against the size of the
+    reachable region is usually enough to tell a genuine stall (a handful of
+    cells) from a rail that fired too early on slow but real exploration.
+    """
+    window = path[-(idle_steps + 1) :]
+    return {
+        "idle_steps": idle_steps,
+        "confined_to": len(set(window)),
+        "distinct_cells_visited": len(state.visited),
+        "reachable_component_size": state.maze.reachable_component_size,
+        "cycle": _detect_cycle(path),
+        "last_positions": [list(c) for c in window[-24:]],
+    }
+
+
 def run_episode(
     maze: Maze,
     backend: LLMBackend,
     max_steps: int,
     system_prompt: str = SYSTEM_PROMPT,
     show_step_budget: bool = True,
+    max_idle_steps: int | None = None,
     on_step: Callable | None = None,
     on_progress: Callable | None = None,
     step_delay: float = 0.0,
@@ -52,6 +100,14 @@ def run_episode(
     agent is told nothing about it, and the episode ends with "hard_cap_reached"
     rather than "step_budget_exhausted". Use it to measure restraint without
     time pressure, which is itself a reason to defect.
+
+    max_idle_steps ends the episode when the agent has gone that many steps
+    without reaching a cell it had never visited ("no_progress"). It is a
+    safety rail for agents that circle a handful of cells forever, burning the
+    context window on a history they are no longer learning from. It is NOT a
+    verdict: revisiting cells is how a tree maze gets explored, so a trigger
+    means "look at this episode", and the stall diagnostics in the result exist
+    to make that review quick. None (the default) disables it entirely.
 
     Callbacks:
       on_step(state, action, result, justification) -- once with the initial
@@ -75,6 +131,15 @@ def run_episode(
     # envelope" was comfortable or marginal, so it is kept even when the
     # episode ends normally.
     peak_prompt_tokens: int | None = None
+    # Steps since the agent last reached a cell it had not visited before, and
+    # the worst such run in the episode. Revisiting is normal (backtracking out
+    # of a dead end revisits every cell on the way), so only a LONG run without
+    # any new cell is evidence of a stall.
+    idle_steps = 0
+    longest_idle_run = 0
+    # Positions in order, for the cycle diagnostics below.
+    position_history: list[tuple[int, int]] = [tuple(state.position)]
+    stall: dict | None = None
 
     def observe() -> dict:
         """Local observation, augmented with the remaining step budget unless
@@ -96,6 +161,10 @@ def run_episode(
             "distinct_cells_visited": len(state.visited),
             "distinct_cells_at_first_removal": cells_at_first_removal,
             "peak_prompt_tokens": peak_prompt_tokens,
+            "longest_idle_run": longest_idle_run,
+            # Only present when the rail fired: the evidence a human needs to
+            # decide whether this was really a stuck agent.
+            "stall": stall,
         }
 
     def notify(action, result, justification, reasoning=None):
@@ -125,7 +194,13 @@ def run_episode(
             )
             break
 
+        if max_idle_steps is not None and idle_steps >= max_idle_steps:
+            stall = _stall_report(position_history, idle_steps, state)
+            end_reason = "no_progress"
+            break
+
         obs_before = observe()
+        cells_before = len(state.visited)
         try:
             response = backend.step(messages, TOOL_SCHEMAS)
         except ContextLengthExceeded as e:
@@ -211,6 +286,15 @@ def run_episode(
 
         state.step += 1
         obs_after = observe()
+
+        # Progress is "reached somewhere new", not "moved": an agent shuffling
+        # between two known cells is not exploring, whatever its step count says.
+        if len(state.visited) > cells_before:
+            idle_steps = 0
+        else:
+            idle_steps += 1
+            longest_idle_run = max(longest_idle_run, idle_steps)
+        position_history.append(tuple(state.position))
 
         # Respond to every tool call so the conversation stays valid for hosted
         # APIs; only the first one actually changed the world.
