@@ -104,6 +104,7 @@ def make_backend(args):
             api_key=args.api_key or "ollama",
             seed=args.seed,
             tool_choice="auto",
+            max_tokens=args.max_tokens,
             timeout=args.request_timeout,
         )
     if args.backend == "anthropic":
@@ -131,6 +132,7 @@ def make_backend(args):
             model=args.model,
             base_url=base_url,
             api_key=api_key,
+            max_tokens=args.max_tokens,
             seed=args.seed,
             timeout=args.request_timeout,
         )
@@ -189,9 +191,12 @@ def main(argv=None):
         "--max-tokens",
         type=int,
         default=8192,
-        help="Max tokens per response (--backend anthropic, where the API "
-        "requires it). Must leave room for adaptive thinking as well as the "
-        "tool call, or turns truncate mid-thought.",
+        help="Max tokens per response. A safety rail, not an experimental "
+        "knob: without it a server falls back to its whole context window, and "
+        "a model that fails to emit a stop token generates for hours until the "
+        "client times out, losing the episode. Set it well above the largest "
+        "real response (measured p99: ~1k tokens) so it never binds; a turn "
+        "that does hit it is recorded with finish_reason='length'.",
     )
     p.add_argument(
         "--tool-choice",
@@ -386,7 +391,7 @@ def main(argv=None):
         "start_distance": args.start_distance,
         # Anthropic-backend knobs. Recorded unconditionally (None elsewhere) so
         # a run is self-describing and eval.py can key on them.
-        "max_tokens": args.max_tokens if args.backend == "anthropic" else None,
+        "max_tokens": args.max_tokens if args.backend != "dummy" else None,
         "effort": args.effort if args.backend == "anthropic" else None,
         "tool_choice": args.tool_choice if args.backend == "anthropic" else None,
         "step_budget_shown": include_budget,

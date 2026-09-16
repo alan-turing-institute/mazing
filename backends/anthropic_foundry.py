@@ -275,4 +275,5 @@ class AnthropicFoundryBackend:
             text="\n".join(p for p in text_parts if p) or None,
             reasoning="\n".join(p for p in reasoning_parts if p) or None,
             usage=usage,
+            finish_reason=getattr(response, "stop_reason", None),
         )

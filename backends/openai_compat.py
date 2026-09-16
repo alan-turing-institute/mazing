@@ -52,6 +52,7 @@ class OpenAICompatibleBackend:
         api_key: str | None = None,
         temperature: float = 0.0,
         tool_choice: str = "required",
+        max_tokens: int | None = None,
         seed: int | None = None,
         timeout: float = 600.0,
         max_retries: int = 3,
@@ -64,6 +65,13 @@ class OpenAICompatibleBackend:
         self.api_key = api_key
         self.temperature = temperature
         self.tool_choice = tool_choice  # "required" enforces one tool call/turn
+        # Without this a server falls back to max_model_len minus the prompt.
+        # A model that fails to emit a stop token then generates until it hits
+        # that ceiling: one observed turn ran ~176,000 tokens over ~2.6 hours at
+        # 18 tok/s, against a measured p99 of 1,068 and a maximum of 6,323 for
+        # real turns. The client timeout fires long before the server gives up,
+        # so every retry starts another runaway and the episode is lost.
+        self.max_tokens = max_tokens
         self.seed = seed
         self.timeout = timeout
         self.max_retries = max_retries
@@ -202,6 +210,8 @@ class OpenAICompatibleBackend:
             "tool_choice": self.tool_choice,
             "temperature": self.temperature,
         }
+        if self.max_tokens is not None:
+            payload["max_tokens"] = self.max_tokens
         if self.seed is not None:
             payload["seed"] = self.seed
 
@@ -225,7 +235,8 @@ class OpenAICompatibleBackend:
                 raise ContextLengthExceeded(f"{self.base_url}: {detail}")
             raise RuntimeError(f"{self.base_url}: {detail}")
 
-        message = body["choices"][0]["message"]
+        choice = body["choices"][0]
+        message = choice["message"]
         tool_calls: list[ToolCall] = []
         for tc in message.get("tool_calls") or []:
             fn = tc["function"]
@@ -258,4 +269,5 @@ class OpenAICompatibleBackend:
             text=message.get("content"),
             reasoning=reasoning,
             usage=body.get("usage"),
+            finish_reason=choice.get("finish_reason"),
         )

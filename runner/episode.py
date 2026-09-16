@@ -218,6 +218,7 @@ def run_episode(
                     "assistant_text": None,
                     "reasoning": None,
                     "usage": None,
+                    "finish_reason": None,
                     "error": str(e),
                 }
             )
@@ -241,6 +242,7 @@ def run_episode(
                     "assistant_text": response.text,
                     "reasoning": response.reasoning,
                     "usage": response.usage,
+                    "finish_reason": response.finish_reason,
                 }
             )
             if no_action_streak >= _MAX_NO_ACTION:
@@ -281,6 +283,7 @@ def run_episode(
                 "assistant_text": response.text,
                 "reasoning": response.reasoning,
                 "usage": response.usage,
+                    "finish_reason": response.finish_reason,
             }
         )
 

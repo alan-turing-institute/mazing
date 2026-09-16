@@ -958,3 +958,87 @@ def test_throttling_does_not_consume_the_transport_retry_budget(monkeypatch):
     )
     assert backend.step([], []).text == "ok"
     assert len(calls) == 9
+
+
+def test_openai_backend_sends_max_tokens(monkeypatch):
+    """Without a cap the server falls back to its whole context window.
+
+    A model that fails to emit a stop token then generates until it hits that
+    ceiling. One observed turn ran ~176,000 tokens over ~2.6 hours at 18 tok/s
+    against a measured p99 of 1,068 for real turns; the client timed out long
+    before the server finished, and every retry started another runaway, so the
+    episode was lost and the run died.
+    """
+    from backends import openai_compat
+
+    body = {"choices": [{"message": {"role": "assistant", "content": "ok"},
+                         "finish_reason": "stop"}]}
+    seen = {}
+
+    def capture(req, timeout=None):
+        seen.update(json.loads(req.data.decode()))
+        return _fake_response(body)
+
+    monkeypatch.setattr(openai_compat.urllib.request, "urlopen", capture)
+    backend = openai_compat.OpenAICompatibleBackend(
+        model="m", base_url="http://x/v1", max_tokens=8192
+    )
+    backend.step([], [])
+    assert seen["max_tokens"] == 8192
+
+
+def test_openai_backend_omits_max_tokens_when_unset(monkeypatch):
+    """Not every server wants the field; absent means absent, not zero."""
+    from backends import openai_compat
+
+    body = {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+    seen = {}
+
+    def capture(req, timeout=None):
+        seen.update(json.loads(req.data.decode()))
+        return _fake_response(body)
+
+    monkeypatch.setattr(openai_compat.urllib.request, "urlopen", capture)
+    backend = openai_compat.OpenAICompatibleBackend(model="m", base_url="http://x/v1")
+    backend.step([], [])
+    assert "max_tokens" not in seen
+
+
+def test_truncated_response_is_visible_as_finish_reason(monkeypatch):
+    """A turn cut off by the cap must be identifiable as truncation, not
+    surface downstream as an agent that simply failed to act."""
+    from backends import openai_compat
+
+    body = {"choices": [{"message": {"role": "assistant", "content": "half a th"},
+                         "finish_reason": "length"}]}
+    monkeypatch.setattr(
+        openai_compat.urllib.request, "urlopen",
+        lambda req, timeout=None: _fake_response(body),
+    )
+    backend = openai_compat.OpenAICompatibleBackend(
+        model="m", base_url="http://x/v1", max_tokens=16
+    )
+    assert backend.step([], []).finish_reason == "length"
+
+
+def test_runner_records_finish_reason_per_step(tmp_path):
+    """eval.py reports the truncation count per cell, so it has to be on the
+    trajectory rather than inferred."""
+    run_module.main(
+        ["--backend", "dummy", "--n-mazes", "1", "--rows", "5", "--cols", "5",
+         "--max-steps", "3", "--out-dir", str(tmp_path)]
+    )
+    (episode_path,) = tmp_path.glob("*/*/episode_*.json")
+    traj = json.loads(episode_path.read_text())["trajectory"]
+    assert traj and all("finish_reason" in t for t in traj)
+
+
+def test_max_tokens_does_not_split_a_cell(tmp_path):
+    """The cap is a rail like max_idle_steps, not an experimental knob: runs
+    that differ only in a rail that never fired must stay one cell, or adding
+    the rail would orphan every episode collected before it."""
+    a = {"model": "m", "max_tokens": None, "rows": 9, "cols": 9}
+    b = {"model": "m", "max_tokens": 8192, "rows": 9, "cols": 9}
+    assert eval_module.group_key(a) == eval_module.group_key(b)
+    assert "max_tokens" not in eval_module.GROUP_NAMES
+    assert "max_tokens" in eval_module.POOLABLE_FIELDS

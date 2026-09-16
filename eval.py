@@ -67,13 +67,10 @@ GROUP_FIELDS: tuple[tuple[str, object], ...] = (
     ("start_distance", lambda c: c.get("start_distance")),
     ("rows", lambda c: c.get("rows")),
     ("cols", lambda c: c.get("cols")),
-    # Reasoning depth and the per-response token ceiling are behavioural, not
-    # operational: effort changes how hard the model thinks before judging
-    # necessity, and a max_tokens that truncates a turn mid-thought is the same
-    # kind of confound max_steps is. Absent in every pre-Anthropic run, which
-    # is exactly the None they implicitly had.
+    # Reasoning depth is behavioural: effort changes how hard the model thinks
+    # before judging necessity. Absent in every pre-Anthropic run, which is
+    # exactly the None they implicitly had.
     ("effort", lambda c: c.get("effort")),
-    ("max_tokens", lambda c: c.get("max_tokens")),
     # Forcing a tool call suppresses the model's thinking, so this changes how
     # much deliberation precedes a removal — the thing being measured.
     ("tool_choice", lambda c: c.get("tool_choice")),
@@ -92,6 +89,12 @@ POOLABLE_FIELDS = {
     "n_mazes",
     "request_timeout",
     "max_idle_steps",
+    # A rail, like max_idle_steps, not an experimental knob: it exists so a
+    # model that fails to emit a stop token cannot generate until the client
+    # times out and the episode is lost. Set above the largest real response it
+    # never binds, and a turn that does hit it is reported as truncation below,
+    # so a rail that fires is always visible without splitting a cell.
+    "max_tokens",
     "seed",
     "band",
     "task_prompt_file",
@@ -194,6 +197,24 @@ def aggregate(episodes: list[dict]) -> dict:
             "n_episodes": len(items),
             "n_context_exhausted": len(exhausted),
             "n_no_progress": len(stalled),
+            # Turns the response-token rail actually cut off. It is poolable
+            # because it normally never binds; if it does, the model was
+            # truncated mid-answer and that must be visible rather than
+            # surfacing as an agent that merely failed to act.
+            "n_truncated_turns": sum(
+                1
+                for d in items
+                for t in d.get("trajectory", [])
+                if t.get("finish_reason") == "length"
+            ),
+            "n_truncated_episodes": sum(
+                1
+                for d in items
+                if any(
+                    t.get("finish_reason") == "length"
+                    for t in d.get("trajectory", [])
+                )
+            ),
             "mean_peak_prompt_tokens": _mean(
                 [d["metrics"].get("peak_prompt_tokens") for d in items]
             ),
@@ -286,8 +307,6 @@ def print_report(agg: dict) -> None:
             # columns to every local-model cell.
             if field(key, "effort") is not None:
                 cond.append(f"effort {field(key, 'effort')}")
-            if field(key, "max_tokens") is not None:
-                cond.append(f"max_tokens {field(key, 'max_tokens')}")
             if field(key, "tool_choice") is not None:
                 cond.append(f"tool_choice {field(key, 'tool_choice')}")
             cond.append(f"task {field(key, 'task_hash')}")
@@ -306,6 +325,13 @@ def print_report(agg: dict) -> None:
                     f"    no progress (stalled): "
                     f"{_pct(r['n_no_progress'], r['n_episodes'])}"
                     " of episodes — held out; review with experiments/review_stalls.py"
+                )
+            if r["n_truncated_turns"]:
+                print(
+                    f"    TRUNCATED responses:   {r['n_truncated_turns']} turn(s) "
+                    f"across {r['n_truncated_episodes']} episode(s) hit the "
+                    f"max_tokens rail — raise --max-tokens; these turns were cut "
+                    f"off mid-answer"
                 )
             if r["mean_peak_prompt_tokens"] is not None:
                 print(
@@ -406,6 +432,7 @@ def write_csv(agg: dict, path: Path) -> None:
         "n_episodes",
         "n_context_exhausted",
         "n_no_progress",
+        "n_truncated_turns",
         "mean_peak_prompt_tokens",
         "reached_goal",
         "n_solvable",

@@ -48,6 +48,10 @@ class LLMResponse:
     # verbatim, when it reports one. Recorded per step so the approach to the
     # context ceiling is visible before the episode hits it.
     usage: dict | None = None
+    # Why the model stopped ("stop"/"tool_calls"/"length"/...). Recorded so a
+    # response cut off by the token cap is visible as truncation rather than
+    # surfacing downstream as an agent that simply failed to act.
+    finish_reason: str | None = None
 
 
 @runtime_checkable
