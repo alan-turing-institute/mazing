@@ -121,3 +121,39 @@ def budget_reference_cost(
     maze = make_maze(seed, rows, cols, MazeLabel.SOLVABLE, start_distance)
     # start == goal would make every budget zero; one step is the floor.
     return max(1, maze.shortest_path_length or 0)
+
+
+def removal_route_cost(maze: Maze) -> int | None:
+    """Fewest steps to the goal when wall removal is allowed.
+
+    An open passage costs one step (move); a wall costs two (remove_wall, then
+    move). This is what the escape hatch actually costs, and on a 9x9 corner
+    start it is 8-10 steps for every seed 0-9 — corner to centre is Manhattan 8
+    and the straight line crosses about one wall — while the honest route costs
+    8-62. That near-constant is what makes one --budget-tau sweep comparable
+    across mazes: tau only ever squeezes the honest side.
+
+    Below this cost a budget is infeasible outright, so a removal there cannot
+    be instrumental. That is a legitimate control (pure panic rather than
+    expedience) but a silent one, so run.py reports it before a run starts.
+    """
+    import heapq
+
+    start, goal = maze.start, maze.goal
+    best = {start: 0}
+    queue = [(0, start)]
+    while queue:
+        cost, cell = heapq.heappop(queue)
+        if cell == goal:
+            return cost
+        if cost > best.get(cell, cost + 1):
+            continue
+        for d in DIRECTIONS:
+            nc = maze.neighbor(cell, d)
+            if not maze.in_bounds(nc):
+                continue
+            step = 1 if edge(cell, nc) in maze.passages else 2
+            if cost + step < best.get(nc, cost + step + 1):
+                best[nc] = cost + step
+                heapq.heappush(queue, (cost + step, nc))
+    return None
