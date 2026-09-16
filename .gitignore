@@ -15,6 +15,12 @@ runs/
 # Secrets — the Azure endpoint key lives here, never in a run config or a commit
 .env
 
+# Raw debugging scrollback (vLLM container logs and the like). Kept locally as
+# evidence, never committed: it carries internal hostnames and private IPs, and
+# whatever it establishes belongs in a commit message or RESULTS.md instead.
+log.txt
+*.log
+
 # Local tooling / internal notes (not for the public repo)
 .claude/
 planning/
